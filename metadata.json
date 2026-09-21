@@ -1,0 +1,6 @@
+{
+  "name": "يومية النقدية",
+  "description": "تطبيق إدارة النقدية واليومية وحسابات الماكينات ومطابقة الأرصدة للأنشطة التجارية الصغيرة",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
