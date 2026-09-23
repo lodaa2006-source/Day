@@ -46,6 +46,7 @@ DECLARE
   v_item JSONB;
   v_item_id TEXT;
   v_item_cents BIGINT;
+  v_raw_amount TEXT;
   v_total_allocated_cents BIGINT := 0;
   v_machine_openings_json JSONB := '[]'::jsonb;
   v_assigned_cents BIGINT;
@@ -94,13 +95,17 @@ BEGIN
   END IF;
 
   -- 8. Validate business date
-  IF p_business_date IS NULL OR p_business_date <= v_latest_day.business_date THEN
+  IF p_business_date IS NULL THEN
     RAISE EXCEPTION 'ERR_INVALID_BUSINESS_DATE';
   END IF;
 
   -- 9. Duplicate date check
   IF EXISTS (SELECT 1 FROM public.days WHERE business_date = p_business_date) THEN
     RAISE EXCEPTION 'ERR_DATE_ALREADY_EXISTS';
+  END IF;
+
+  IF p_business_date <= v_latest_day.business_date THEN
+    RAISE EXCEPTION 'ERR_INVALID_BUSINESS_DATE';
   END IF;
 
   -- 10. Validate manual opening business balance
@@ -121,8 +126,54 @@ BEGIN
   FOR UPDATE;
 
   -- 13. Validate machine openings array payload (if provided)
-  IF p_machine_openings IS NOT NULL AND jsonb_typeof(p_machine_openings) = 'array' THEN
-    -- Check for duplicate machine IDs in payload
+  IF p_machine_openings IS NOT NULL THEN
+    IF jsonb_typeof(p_machine_openings) <> 'array' THEN
+      RAISE EXCEPTION 'ERR_INVALID_PAYLOAD';
+    END IF;
+
+    -- Validate each specified machine BEFORE duplicate check
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_machine_openings)
+    LOOP
+      IF jsonb_typeof(v_item) <> 'object' THEN
+        RAISE EXCEPTION 'ERR_INVALID_PAYLOAD';
+      END IF;
+
+      v_item_id := trim(COALESCE(v_item->>'id', v_item->>'machine_account_id', ''));
+      IF v_item_id = '' THEN
+        RAISE EXCEPTION 'ERR_INVALID_MACHINE';
+      END IF;
+
+      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id) THEN
+        RAISE EXCEPTION 'ERR_ACCOUNT_NOT_FOUND';
+      END IF;
+
+      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id AND is_active = true) THEN
+        RAISE EXCEPTION 'ERR_ACCOUNT_INACTIVE';
+      END IF;
+
+      IF NOT (v_item ? 'opening_balance_cents') OR jsonb_typeof(v_item->'opening_balance_cents') = 'null' THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_raw_amount := trim(v_item->>'opening_balance_cents');
+      IF v_raw_amount = '' OR v_raw_amount !~ '^[0-9]+$' THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      IF length(v_raw_amount) > 19 OR (length(v_raw_amount) = 19 AND v_raw_amount > '9223372036854775807') THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_item_cents := v_raw_amount::BIGINT;
+
+      IF (9223372036854775807::BIGINT - v_item_cents) < v_total_allocated_cents THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_total_allocated_cents := v_total_allocated_cents + v_item_cents;
+    END LOOP;
+
+    -- Check for duplicate machine IDs in payload after validating element integrity
     IF EXISTS (
       SELECT 1 FROM jsonb_array_elements(p_machine_openings) elem
       GROUP BY trim(COALESCE(elem->>'id', elem->>'machine_account_id', ''))
@@ -130,27 +181,6 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'ERR_DUPLICATE_MACHINE_OPENING';
     END IF;
-
-    -- Validate each specified machine
-    FOR v_item IN SELECT * FROM jsonb_array_elements(p_machine_openings)
-    LOOP
-      v_item_id := trim(COALESCE(v_item->>'id', v_item->>'machine_account_id', ''));
-      v_item_cents := (v_item->>'opening_balance_cents')::BIGINT;
-
-      IF v_item_id = '' THEN
-        RAISE EXCEPTION 'ERR_INVALID_MACHINE';
-      END IF;
-
-      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id AND is_active = true) THEN
-        RAISE EXCEPTION 'ERR_ACCOUNT_NOT_FOUND';
-      END IF;
-
-      IF v_item_cents IS NULL OR v_item_cents < 0 THEN
-        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
-      END IF;
-
-      v_total_allocated_cents := v_total_allocated_cents + v_item_cents;
-    END LOOP;
   END IF;
 
   -- 14. Enforce Opening Allocation Invariant: SUM(machine allocations) <= business opening
@@ -276,6 +306,7 @@ DECLARE
   v_item JSONB;
   v_item_id TEXT;
   v_item_cents BIGINT;
+  v_raw_amount TEXT;
   v_machine RECORD;
   v_assigned_cents BIGINT;
   v_machine_openings_json JSONB := '[]'::jsonb;
@@ -343,7 +374,49 @@ BEGIN
       RAISE EXCEPTION 'ERR_INVALID_PAYLOAD';
     END IF;
 
-    -- Check for duplicate machine IDs
+    -- Validate each item first BEFORE duplicate check
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_machine_openings)
+    LOOP
+      IF jsonb_typeof(v_item) <> 'object' THEN
+        RAISE EXCEPTION 'ERR_INVALID_PAYLOAD';
+      END IF;
+
+      v_item_id := trim(COALESCE(v_item->>'id', v_item->>'machine_account_id', ''));
+      IF v_item_id = '' THEN
+        RAISE EXCEPTION 'ERR_INVALID_MACHINE';
+      END IF;
+
+      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id) THEN
+        RAISE EXCEPTION 'ERR_ACCOUNT_NOT_FOUND';
+      END IF;
+
+      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id AND is_active = true) THEN
+        RAISE EXCEPTION 'ERR_ACCOUNT_INACTIVE';
+      END IF;
+
+      IF NOT (v_item ? 'opening_balance_cents') OR jsonb_typeof(v_item->'opening_balance_cents') = 'null' THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_raw_amount := trim(v_item->>'opening_balance_cents');
+      IF v_raw_amount = '' OR v_raw_amount !~ '^[0-9]+$' THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      IF length(v_raw_amount) > 19 OR (length(v_raw_amount) = 19 AND v_raw_amount > '9223372036854775807') THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_item_cents := v_raw_amount::BIGINT;
+
+      IF (9223372036854775807::BIGINT - v_item_cents) < v_new_allocated THEN
+        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
+      END IF;
+
+      v_new_allocated := v_new_allocated + v_item_cents;
+    END LOOP;
+
+    -- Check for duplicate machine IDs after element-level validation
     IF EXISTS (
       SELECT 1 FROM jsonb_array_elements(p_machine_openings) elem
       GROUP BY trim(COALESCE(elem->>'id', elem->>'machine_account_id', ''))
@@ -351,27 +424,6 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'ERR_DUPLICATE_MACHINE_OPENING';
     END IF;
-
-    -- Validate each item
-    FOR v_item IN SELECT * FROM jsonb_array_elements(p_machine_openings)
-    LOOP
-      v_item_id := trim(COALESCE(v_item->>'id', v_item->>'machine_account_id', ''));
-      v_item_cents := (v_item->>'opening_balance_cents')::BIGINT;
-
-      IF v_item_id = '' THEN
-        RAISE EXCEPTION 'ERR_INVALID_MACHINE';
-      END IF;
-
-      IF NOT EXISTS (SELECT 1 FROM public.machine_accounts WHERE id = v_item_id AND is_active = true) THEN
-        RAISE EXCEPTION 'ERR_ACCOUNT_NOT_FOUND';
-      END IF;
-
-      IF v_item_cents IS NULL OR v_item_cents < 0 THEN
-        RAISE EXCEPTION 'ERR_INVALID_AMOUNT';
-      END IF;
-
-      v_new_allocated := v_new_allocated + v_item_cents;
-    END LOOP;
 
     IF v_new_allocated > p_new_opening_business_cents THEN
       RAISE EXCEPTION 'ERR_OPENING_LESS_THAN_ALLOCATED';
