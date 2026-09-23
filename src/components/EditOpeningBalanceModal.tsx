@@ -27,7 +27,7 @@ export const EditOpeningBalanceModal: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (isCurrentDayClosed) {
-      setError('لا يمكن تعديل رصيد البداية ليوم مغلق. يجب إعادة فتح اليوم أولاً.');
+      setError('لا يمكن تعديل رصيد البداية ليوم مغلق.');
       return;
     }
 
@@ -94,7 +94,7 @@ export const EditOpeningBalanceModal: React.FC = () => {
           {isCurrentDayClosed && (
             <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-bold flex items-start gap-2">
               <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <span>اليوم مغلق حالياً. لتعديل رصيد البداية أو الحركات، يجب إعادة فتح اليوم أولاً.</span>
+              <span>اليوم مغلق حالياً. السجلات المالية لليوم المغلق نهائية وغير قابلة للتعديل.</span>
             </div>
           )}
 

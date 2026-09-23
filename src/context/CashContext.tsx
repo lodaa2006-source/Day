@@ -50,9 +50,8 @@ interface CashContextType {
   isViewingHistoricalDay: boolean;
 
   // Day Lifecycle Actions
-  startNextDay: (openingCents?: number) => Day;
+  startNextDay: (openingBusinessCents: number, machineOpenings?: Record<string, number>) => Day;
   closeDay: (actualCountedCents: number, notes?: string) => void;
-  reopenDay: (dayId: string) => void;
 
   // Modals
   isAddTransactionOpen: boolean;
@@ -385,7 +384,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeAmount = cents !== null ? Math.max(0, Math.round(cents)) : null;
       if (!currentDay) return;
       if (currentDay.status === 'CLOSED') {
-        throw new Error('لا يمكن تعديل المبلغ الفعلي ليوم مغلق. يجب إعادة فتح اليوم أولاً.');
+        throw new Error('لا يمكن تعديل المبلغ الفعلي ليوم مغلق.');
       }
       setDays((prev) =>
         prev.map((d) => (d.id === currentDay.id ? { ...d, actualClosingBalanceCents: safeAmount } : d))
@@ -407,25 +406,8 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeCounted = Math.max(0, Math.round(countedCents));
       const now = new Date().toISOString();
 
-      setDays((prev) => {
-        const closedIndex = prev.findIndex((d) => d.id === activeDay.id);
-        const nextDay = closedIndex !== -1 && closedIndex + 1 < prev.length ? prev[closedIndex + 1] : null;
-
-        let nextDayUpdates: Partial<Day> | null = null;
-        if (nextDay) {
-          const dayTxs = allTransactions.filter((tx) => tx.dayId === activeDay.id);
-          const nextMachineOpenings: Record<string, number> = {};
-          for (const m of machines) {
-            const prevInit = activeDay.machineOpeningBalances?.[m.id] ?? m.initialBalanceCents;
-            nextMachineOpenings[m.id] = calculateMachineClosingBalance(m.id, prevInit, dayTxs);
-          }
-          nextDayUpdates = {
-            openingBusinessBalanceCents: safeCounted,
-            machineOpeningBalances: nextMachineOpenings,
-          };
-        }
-
-        return prev.map((d, idx) => {
+      setDays((prev) =>
+        prev.map((d) => {
           if (d.id === activeDay.id) {
             return {
               ...d,
@@ -435,87 +417,44 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
               notes: notes ? notes.trim() : d.notes,
             };
           }
-          if (nextDayUpdates && idx === closedIndex + 1) {
-            return {
-              ...d,
-              ...nextDayUpdates,
-            };
-          }
           return d;
-        });
-      });
+        })
+      );
     },
-    [activeDay, allTransactions, machines]
+    [activeDay]
   );
 
-  // Day Lifecycle: Start Next Day
+  // Day Lifecycle: Start Next Day (Manual Entry Only)
   const startNextDay = useCallback(
-    (customOpeningCents?: number): Day => {
-      // Must look at the latest day in chronological sequence
+    (openingBusinessCents: number, machineOpenings?: Record<string, number>): Day => {
       const lastDay = days[days.length - 1] || activeDay || null;
-      if (!lastDay) {
-        const totalMachineInitial = machines.reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
-        const nextOpeningBusinessBalance =
-          customOpeningCents !== undefined ? Math.max(0, Math.round(customOpeningCents)) : totalMachineInitial;
-        if (nextOpeningBusinessBalance < totalMachineInitial) {
-          throw new Error(
-            `لا يمكن أن يكون رصيد بداية اليوم أقل من إجمالي رصيد الماكينات (${formatEGP(totalMachineInitial)}).`
-          );
+      const safeOpening = Math.max(0, Math.round(openingBusinessCents));
+
+      if (lastDay) {
+        // Validate transitions: previous day must be CLOSED
+        const dayTxs = allTransactions.filter((tx) => tx.dayId === lastDay.id);
+        const validation = validateStartNextDay(lastDay, dayTxs);
+        if (!validation.valid) {
+          throw new Error(validation.error || 'لا يمكن بدء يوم جديد');
         }
-        const todayStr = new Date().toISOString().split('T')[0];
-        const newDayId = `day-${todayStr}-${Date.now().toString(36).substring(2, 6)}`;
-        const now = new Date().toISOString();
-        const nextMachineOpeningBalances: Record<string, number> = {};
-        for (const m of machines) {
-          nextMachineOpeningBalances[m.id] = m.initialBalanceCents;
-        }
-        const newDay: Day = {
-          id: newDayId,
-          date: todayStr,
-          status: 'OPEN',
-          openingBusinessBalanceCents: nextOpeningBusinessBalance,
-          actualClosingBalanceCents: null,
-          machineOpeningBalances: nextMachineOpeningBalances,
-          createdAt: now,
-          closedAt: null,
-        };
-
-        setDays([newDay]);
-        setActiveDayId(newDay.id);
-        setViewingDayId(newDay.id);
-
-        return newDay;
       }
 
-      // Validate transitions
-      const dayTxs = allTransactions.filter((tx) => tx.dayId === lastDay.id);
-      const validation = validateStartNextDay(lastDay, dayTxs);
-      if (!validation.valid) {
-        throw new Error(validation.error || 'لا يمكن بدء يوم جديد');
-      }
-
-      // Next opening balance MUST default to previous day's actual counted balance!
-      let nextOpeningBusinessBalance = customOpeningCents !== undefined ? Math.max(0, Math.round(customOpeningCents)) : 0;
-      if (lastDay.actualClosingBalanceCents !== null && customOpeningCents === undefined) {
-        nextOpeningBusinessBalance = lastDay.actualClosingBalanceCents;
-      }
-
-      // Carry forward machine closing balances
+      // Explicit manual machine openings - NO automatic carry forward
       const nextMachineOpeningBalances: Record<string, number> = {};
       for (const m of machines) {
-        const prevInitial = lastDay.machineOpeningBalances?.[m.id] ?? m.initialBalanceCents;
-        const closingBal = calculateMachineClosingBalance(m.id, prevInitial, dayTxs);
-        nextMachineOpeningBalances[m.id] = closingBal;
+        if (!m.isActive) continue;
+        const userVal = machineOpenings?.[m.id];
+        nextMachineOpeningBalances[m.id] = userVal !== undefined ? Math.max(0, Math.round(userVal)) : 0;
       }
 
-      // Verify next opening business balance is not less than the carried forward machine balances
-      const totalMachinesCalculated = Object.values(nextMachineOpeningBalances).reduce(
-        (acc, b) => safeAdd(acc, b),
+      // Allocation Invariant: SUM(machine allocations) <= business opening
+      const totalAllocated = Object.values(nextMachineOpeningBalances).reduce(
+        (acc, val) => safeAdd(acc, val),
         0
       );
-      if (nextOpeningBusinessBalance < totalMachinesCalculated) {
+      if (totalAllocated > safeOpening) {
         throw new Error(
-          `لا يمكن أن يكون رصيد بداية اليوم أقل من إجمالي أرصدة الماكينات المرحلة (${formatEGP(totalMachinesCalculated)}).`
+          `لا يمكن أن يتجاوز إجمالي المبالغ الموزعة على الماكينات (${formatEGP(totalAllocated)}) رصيد بداية النشاط (${formatEGP(safeOpening)}).`
         );
       }
 
@@ -527,7 +466,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: newDayId,
         date: todayStr,
         status: 'OPEN',
-        openingBusinessBalanceCents: nextOpeningBusinessBalance,
+        openingBusinessBalanceCents: safeOpening,
         actualClosingBalanceCents: null,
         machineOpeningBalances: nextMachineOpeningBalances,
         createdAt: now,
@@ -541,28 +480,6 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return newDay;
     },
     [activeDay, days, allTransactions, machines]
-  );
-
-  // Explicit Reopen Day Workflow (with strict chronological integrity)
-  const reopenDay = useCallback(
-    (dayId: string) => {
-      const targetDay = days.find((d) => d.id === dayId);
-      if (!targetDay) throw new Error('اليوم المطلوب غير موجود');
-
-      setDays((prev) =>
-        prev.map((d) => {
-          if (d.id !== dayId) return d;
-          return {
-            ...d,
-            status: 'OPEN',
-            closedAt: null,
-          };
-        })
-      );
-      setActiveDayId(dayId);
-      setViewingDayId(dayId);
-    },
-    [days]
   );
 
   // Transaction CRUD strictly bound to active day
@@ -830,7 +747,6 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isViewingHistoricalDay,
         startNextDay,
         closeDay,
-        reopenDay,
         isAddTransactionOpen,
         setIsAddTransactionOpen,
         isAddMachineOpen,

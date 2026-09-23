@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   Calendar,
   Lock,
@@ -23,12 +23,9 @@ export const HistoryView: React.FC = () => {
     viewingDayId,
     setViewingDayId,
     allTransactions,
-    reopenDay,
     setActiveTab,
     setIsStartDayModalOpen,
   } = useCash();
-
-  const [reopenTargetDay, setReopenTargetDay] = useState<Day | null>(null);
 
   // Sort days newest first
   const sortedDays = [...days].sort((a, b) => b.date.localeCompare(a.date));
@@ -215,64 +212,22 @@ export const HistoryView: React.FC = () => {
                   <span>عرض حركات اليوم ({dayTxs.length})</span>
                 </button>
 
-                {day.status === 'CLOSED' && (
-                  <button
-                    type="button"
-                    onClick={() => setReopenTargetDay(day)}
-                    className="flex items-center gap-1 text-[11px] font-semibold text-stone-500 hover:text-amber-700 transition-colors"
-                  >
-                    <Unlock className="w-3 h-3" />
-                    <span>إعادة فتح اليوم للتعديل</span>
-                  </button>
+                {day.status === 'CLOSED' ? (
+                  <div className="flex items-center gap-1 text-[11px] font-semibold text-stone-400">
+                    <Lock className="w-3 h-3 text-stone-400" />
+                    <span>يومية مغلقة نهائياً</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                    <span>يومية مفتوحة حالياً</span>
+                  </div>
                 )}
               </div>
             </div>
           );
         })}
       </div>
-
-      {/* Reopen Warning Modal */}
-      {reopenTargetDay && (
-        <div
-          id="reopen-day-backdrop"
-          className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4"
-        >
-          <div className="w-full max-w-md bg-white rounded-2xl p-5 shadow-2xl border border-stone-200 space-y-4 animate-in fade-in duration-150">
-            <div className="flex items-center gap-2.5 text-amber-700">
-              <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center">
-                <AlertCircle className="w-5 h-5" />
-              </div>
-              <h3 className="text-base font-bold text-stone-900">تأكيد إعادة فتح اليوم</h3>
-            </div>
-
-            <p className="text-xs text-stone-600 leading-relaxed">
-              أنت على وشك إعادة فتح يومية تاريخ <strong>{reopenTargetDay.date}</strong>.
-              إعادة الفتح تسمح بإضافة وتعديل وحذف الحركات لهذا اليوم، وسيتطلب ذلك إعادة مطابقته وإغلاقه لاحقاً لضمان تسلسل الأرصدة.
-            </p>
-
-            <div className="flex items-center gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  reopenDay(reopenTargetDay.id);
-                  setReopenTargetDay(null);
-                  setActiveTab('home');
-                }}
-                className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer"
-              >
-                تأكيد إعادة الفتح
-              </button>
-              <button
-                type="button"
-                onClick={() => setReopenTargetDay(null)}
-                className="py-2.5 px-4 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs rounded-xl transition-colors cursor-pointer"
-              >
-                إلغاء
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -721,40 +721,28 @@ export function runDeterministicTests(): TestReportItem[] {
     });
   }
 
-  // TEST 20: INVARIANT 12 - Reopen day and re-close produces identical mathematical state
+  // TEST 20: INVARIANT 12 - Closed day immutability (No Reopen)
   {
-    const opening = toCents(10000);
-    const tx1: Transaction = {
-      id: 'tx-r1',
-      dayId: 'day-reopen',
-      transactionKind: 'INCOME',
-      category: 'دخل',
-      description: 'حركة اختبار إعادة الفتح',
-      amountCents: toCents(3000),
-      destinationMachineAccountId: 'm-a',
-      timestamp: '2026-09-18T10:00:00Z',
-      createdAt: '2026-09-18T10:00:00Z',
-      updatedAt: '2026-09-18T10:00:00Z',
+    const dayClosed: Day = {
+      id: 'day-closed-immutable',
+      date: '2026-09-18',
+      status: 'CLOSED',
+      openingBusinessBalanceCents: toCents(10000),
+      machineOpeningBalances: { 'm-a': toCents(10000) },
+      actualClosingBalanceCents: toCents(13000),
+      createdAt: '2026-09-18T08:00:00Z',
+      closedAt: '2026-09-18T22:00:00Z',
     };
-    const summaryFirstClose = calculateDailySummary(opening, [tx1]);
-    const countedFirst = toCents(13000);
-    const recFirst = calculateReconciliation(summaryFirstClose.expectedBalanceCents, countedFirst);
-
-    // Reopening day: status becomes OPEN, closedAt is cleared, transactions are unchanged
-    // Re-closing day with same counted amount:
-    const summarySecondClose = calculateDailySummary(opening, [tx1]);
-    const recSecond = calculateReconciliation(summarySecondClose.expectedBalanceCents, countedFirst);
-
-    const passed =
-      summaryFirstClose.expectedBalanceCents === summarySecondClose.expectedBalanceCents &&
-      recFirst.differenceCents === recSecond.differenceCents &&
-      recFirst.isMatched === recSecond.isMatched;
+    // Ensure day status is strictly CLOSED and immutable
+    const isClosed = dayClosed.status === 'CLOSED';
+    const isLocked = dayClosed.actualClosingBalanceCents !== null && dayClosed.closedAt !== null;
+    const passed = isClosed && isLocked;
 
     results.push({
       testNumber: 20,
-      name: 'معيار 12: دورة (إغلاق ⬅️ إعادة فتح ⬅️ إعادة إغلاق) تعيد الحالة الرياضية والمالية نفسها بنسبة 100%',
+      name: 'معيار 12: حصانة اليوم المغلق - لا يمكن إعادة فتح اليوم بعد إغلاقه وتبقى السجلات نهائية',
       passed,
-      details: `المتوقع الأول: ${fromCents(summaryFirstClose.expectedBalanceCents)} | المتوقع الثاني: ${fromCents(summarySecondClose.expectedBalanceCents)} | تطابق تام`,
+      details: `حالة اليوم: ${dayClosed.status} | الإغلاق: نهائي غير قابل لإعادة الفتح`,
     });
   }
 
@@ -1869,7 +1857,7 @@ export function runDeterministicTests(): TestReportItem[] {
     });
   }
 
-  // TEST 43 (Scenario 11): Day lifecycle and reopening preserves exact mathematical state
+  // TEST 43 (Scenario 11): Day lifecycle and manual start next day (No auto-rollover)
   {
     const day1: Day = {
       id: 'day-lifecycle-sc11',
@@ -1909,24 +1897,31 @@ export function runDeterministicTests(): TestReportItem[] {
     };
     const sumClosed = calculateDaySummary(day1Closed, txs, [mockMachineA]);
 
-    // Reopen Day 1
-    const day1Reopened: Day = {
-      ...day1Closed,
+    // Day 2 starts with MANUALLY entered opening = 25,000 (NOT 34,000 auto-carried)
+    const manualDay2Opening = toCents(25000);
+    const day2: Day = {
+      id: 'day-lifecycle-sc11-day2',
+      date: '2026-09-19',
       status: 'OPEN',
+      openingBusinessBalanceCents: manualDay2Opening,
+      machineOpeningBalances: { 'm-a': toCents(10000) },
       actualClosingBalanceCents: null,
+      createdAt: '2026-09-19T08:00:00Z',
       closedAt: null,
     };
-    const sumReopened = calculateDaySummary(day1Reopened, txs, [mockMachineA]);
+    const sumDay2 = calculateDaySummary(day2, [], [mockMachineA]);
 
     const passed =
       sumBeforeClose.expectedBalanceCents === toCents(34000) &&
       sumClosed.expectedBalanceCents === toCents(34000) &&
-      sumReopened.expectedBalanceCents === toCents(34000);
+      sumDay2.expectedBalanceCents === manualDay2Opening &&
+      day2.openingBusinessBalanceCents !== day1Closed.actualClosingBalanceCents;
+
     results.push({
       testNumber: 43,
-      name: 'سيناريو 11: دورة حياة اليوم وإعادة الفتح تحافظ على الحالة الحسابية بدقة متناهية دون تشويه',
+      name: 'سيناريو 11: اليوم الجديد يبدأ برصيد يدوي منفصل تماماً عن رصيد إغلاق اليوم السابق',
       passed,
-      details: `قبل الإغلاق: ${fromCents(sumBeforeClose.expectedBalanceCents)} | عند الإغلاق: ${fromCents(sumClosed.expectedBalanceCents)} | بعد إعادة الفتح: ${fromCents(sumReopened.expectedBalanceCents)} ج.م`,
+      details: `ختام اليوم الأول: ${fromCents(day1Closed.actualClosingBalanceCents || 0)} | بداية اليوم الثاني اليدوية: ${fromCents(day2.openingBusinessBalanceCents)} ج.م (لم يتم الترحيل التلقائي)`,
     });
   }
 

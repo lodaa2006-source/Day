@@ -1,50 +1,66 @@
-import React, { useState, useEffect } from 'react';
-import { X, Play, ArrowRight, ShieldCheck, AlertCircle, Smartphone } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, Play, ShieldCheck, AlertCircle, Smartphone, Info } from 'lucide-react';
 import { useCash } from '../context/CashContext';
-import { formatEGP, parseAmountToCents, fromCents, safeAdd } from '../utils/money';
-import { calculateMachineClosingBalance } from '../utils/calculations';
+import { formatEGP, parseAmountToCents, safeAdd, safeSubtract } from '../utils/money';
 
 export const StartDayModal: React.FC = () => {
   const {
     isStartDayModalOpen,
     setIsStartDayModalOpen,
     activeDay,
-    allTransactions,
     machines,
     startNextDay,
     setActiveTab,
   } = useCash();
 
-  // Find previous day's actual counted balance
-  const previousActualCounted = activeDay?.actualClosingBalanceCents ?? activeDay?.openingBusinessBalanceCents ?? 0;
+  // Active machines
+  const activeMachines = machines.filter((m) => m.isActive);
 
-  const totalMachineInitial = machines.reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
-  const initialDefault = previousActualCounted > 0 ? previousActualCounted : totalMachineInitial;
-
+  // Manual inputs - intentionally starts empty, NO auto-prefill from previous day
   const [openingInput, setOpeningInput] = useState<string>('');
+  const [machineInputs, setMachineInputs] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  useEffect(() => {
-    setOpeningInput(String(fromCents(initialDefault)));
-  }, [initialDefault, isStartDayModalOpen]);
-
   if (!isStartDayModalOpen) return null;
 
-  // Calculate machine carried-forward balances
-  const prevTxs = activeDay ? allTransactions.filter((tx) => tx.dayId === activeDay.id) : [];
-  const carriedMachineBalances = machines.map((m) => {
-    const prevOpening = activeDay?.machineOpeningBalances?.[m.id] ?? m.initialBalanceCents;
-    const closing = calculateMachineClosingBalance(m.id, prevOpening, prevTxs);
-    return {
-      machine: m,
-      closingBalanceCents: closing,
-    };
-  });
+  // Informational only: previous day's actual counted balance (never automatically applied)
+  const previousActualCounted = activeDay?.actualClosingBalanceCents ?? null;
 
-  const totalCarriedOrInitial = activeDay
-    ? carriedMachineBalances.reduce((a, b) => safeAdd(a, b.closingBalanceCents), 0)
-    : totalMachineInitial;
+  // Real-time calculation of inputs
+  const parsedBusiness = parseAmountToCents(openingInput || '0');
+  const businessCents = parsedBusiness.cents >= 0 && !parsedBusiness.error ? parsedBusiness.cents : 0;
+
+  // Parse machine inputs
+  let totalAllocatedCents = 0;
+  let hasInvalidMachineAmount = false;
+  const machineOpeningsMap: Record<string, number> = {};
+
+  for (const m of activeMachines) {
+    const rawVal = machineInputs[m.id];
+    if (rawVal !== undefined && rawVal.trim() !== '') {
+      const parsedM = parseAmountToCents(rawVal);
+      if (parsedM.error || parsedM.cents < 0) {
+        hasInvalidMachineAmount = true;
+      } else {
+        machineOpeningsMap[m.id] = parsedM.cents;
+        totalAllocatedCents = safeAdd(totalAllocatedCents, parsedM.cents);
+      }
+    } else {
+      machineOpeningsMap[m.id] = 0;
+    }
+  }
+
+  const remainingCashCents = safeSubtract(businessCents, totalAllocatedCents);
+  const isAllocationOverBudget = totalAllocatedCents > businessCents;
+
+  const handleMachineChange = (machineId: string, value: string) => {
+    setMachineInputs((prev) => ({
+      ...prev,
+      [machineId]: value,
+    }));
+    setError(null);
+  };
 
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,23 +73,35 @@ export const StartDayModal: React.FC = () => {
       return;
     }
 
-    const parsed = parseAmountToCents(openingInput);
-    if (parsed.error || parsed.cents < 0) {
-      setError(parsed.error || 'برجاء كتابة رصيد بداية صحيح');
+    if (!openingInput.trim()) {
+      setError('برجاء إدخال رصيد بداية اليوم يدوياً.');
       return;
     }
 
-    if (parsed.cents < totalCarriedOrInitial) {
+    const businessParsed = parseAmountToCents(openingInput);
+    if (businessParsed.error || businessParsed.cents < 0) {
+      setError(businessParsed.error || 'برجاء كتابة رصيد بداية صحيح.');
+      return;
+    }
+
+    if (hasInvalidMachineAmount) {
+      setError('يوجد مبلغ غير صحيح في خانات الماكينات.');
+      return;
+    }
+
+    if (totalAllocatedCents > businessParsed.cents) {
       setError(
-        `لا يمكن أن يكون رصيد بداية اليوم أقل من إجمالي الأرصدة الموزعة على الماكينات (${formatEGP(totalCarriedOrInitial)}).`
+        `لا يمكن أن يتجاوز إجمالي المبالغ الموزعة على الماكينات (${formatEGP(totalAllocatedCents)}) رصيد بداية النشاط (${formatEGP(businessParsed.cents)}).`
       );
       return;
     }
 
     setIsSubmitting(true);
     try {
-      startNextDay(parsed.cents);
+      startNextDay(businessParsed.cents, machineOpeningsMap);
       setIsStartDayModalOpen(false);
+      setOpeningInput('');
+      setMachineInputs({});
       setActiveTab('home');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'حدث خطأ أثناء بدء اليوم');
@@ -102,7 +130,7 @@ export const StartDayModal: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base sm:text-lg font-bold text-stone-900 leading-tight">بدء دورة يوم جديد</h3>
-              <p className="text-xs text-stone-500 mt-0.5">ترحيل الأرصدة وبدء دفتر اليومية</p>
+              <p className="text-xs text-stone-500 mt-0.5">إدخال رصيد البداية وتوزيع العهدة يدوياً</p>
             </div>
           </div>
           <button
@@ -124,29 +152,29 @@ export const StartDayModal: React.FC = () => {
               <div>
                 <div>اليوم الحالي ما زال مفتوحاً!</div>
                 <div className="font-normal text-[11px] mt-0.5 text-rose-700">
-                  بحسب القواعد المالية الدقيقة، يجب مطابقة وإغلاق اليوم الحالي قبل السماح ببدء يومية اليوم التالي.
+                  بحسب القواعد المالية، يجب مطابقة وإغلاق اليوم الحالي قبل السماح ببدء يومية اليوم التالي.
                 </div>
               </div>
             </div>
           )}
 
-          {/* Transition Rule Banner */}
-          <div className="p-3 rounded-xl bg-stone-100 border border-stone-200/80 text-stone-700 text-xs flex items-center justify-between">
-            <div>
-              <span className="text-stone-500 block text-[11px]">الرصيد الفعلي لختام اليوم السابق</span>
-              <span className="font-bold text-stone-900 font-mono">{formatEGP(previousActualCounted)}</span>
+          {/* Informational previous day balance - Strictly non-binding */}
+          {previousActualCounted !== null && (
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-stone-700 text-xs flex items-start gap-2">
+              <Info className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="font-semibold block">معلومات استرشادية لليوم السابق:</span>
+                <span className="text-[11px] text-stone-600">
+                  الرصيد الفعلي لختام اليوم السابق كان <strong>{formatEGP(previousActualCounted)}</strong>. لا يتم ترحيل أي مبالغ تلقائياً؛ يجب إدخال رصيد اليوم وتوزيع الماكينات يدوياً أدناه.
+                </span>
+              </div>
             </div>
-            <ArrowRight className="w-4 h-4 text-stone-400 rotate-180" />
-            <div className="text-left">
-              <span className="text-stone-500 block text-[11px]">رصيد بداية اليوم الجديد</span>
-              <span className="font-bold text-emerald-800 font-mono">{formatEGP(previousActualCounted)}</span>
-            </div>
-          </div>
+          )}
 
-          {/* Opening Balance Input */}
+          {/* Opening Business Balance Input */}
           <div>
             <label htmlFor="start-day-opening-input" className="text-xs font-bold text-stone-800 block mb-1.5">
-              رصيد بداية اليوم الجديد (بالجنيه)
+              رصيد بداية اليوم الجديد (إجمالي النقدية للنشاط) <span className="text-rose-600">*</span>
             </label>
             <div className="relative">
               <input
@@ -167,31 +195,70 @@ export const StartDayModal: React.FC = () => {
               </span>
             </div>
             <p className="text-[11px] text-stone-500 mt-1">
-              تم ضبطه تلقائياً ليعادل المبلغ الفعلي المعدود في ختام اليوم السابق.
+              أدخل المبلغ الإجمالي الذي يبدأ به النشاط اليوم (الدرج + عهد الماكينات).
             </p>
           </div>
 
-          {/* Carried Forward Machine Balances */}
+          {/* Machine Openings Inputs */}
           <div>
             <div className="flex items-center gap-1.5 mb-2">
               <Smartphone className="w-3.5 h-3.5 text-stone-500" />
-              <span className="text-xs font-bold text-stone-700">الأرصدة الافتتاحية للمحفظات والماكينات لليوم الجديد</span>
+              <span className="text-xs font-bold text-stone-700">توزيع العهدة الافتتاحية على الماكينات والحسابات</span>
             </div>
-            <div className="space-y-1.5 max-h-36 overflow-y-auto border border-stone-200 rounded-xl p-2 bg-stone-50/50">
-              {carriedMachineBalances.map(({ machine, closingBalanceCents }) => (
+            <div className="space-y-2 border border-stone-200 rounded-xl p-3 bg-stone-50/50">
+              {activeMachines.map((machine) => (
                 <div
                   key={machine.id}
-                  className="flex items-center justify-between text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/60"
+                  className="flex items-center justify-between gap-3 text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/80"
                 >
-                  <span className="font-medium text-stone-700">{machine.name}</span>
-                  <span className="font-mono font-bold text-stone-900">{formatEGP(closingBalanceCents)}</span>
+                  <label htmlFor={`start-day-machine-${machine.id}`} className="font-semibold text-stone-700 shrink-0">
+                    {machine.name}
+                  </label>
+                  <div className="relative w-32">
+                    <input
+                      id={`start-day-machine-${machine.id}`}
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={machineInputs[machine.id] ?? ''}
+                      onChange={(e) => handleMachineChange(machine.id, e.target.value)}
+                      className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-stone-50 border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
+                    />
+                    <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
+                      ج.م
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
-            <div className="text-[11px] text-stone-400 mt-1 flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>يتم ترحيل أرصدة الماكينات كأرصدة افتتاحية تلقائياً دون تكرار أو إنشاء حركات وهمية.</span>
+          </div>
+
+          {/* Allocation Breakdown Bar */}
+          <div className="p-3 rounded-xl bg-stone-100 border border-stone-200 space-y-1.5 text-xs">
+            <div className="flex items-center justify-between text-stone-600">
+              <span>إجمالي رصيد بداية النشاط:</span>
+              <span className="font-mono font-bold text-stone-900">{formatEGP(businessCents)}</span>
             </div>
+            <div className="flex items-center justify-between text-stone-600">
+              <span>إجمالي الموزع على الماكينات:</span>
+              <span className="font-mono font-bold text-stone-900">{formatEGP(totalAllocatedCents)}</span>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-stone-200">
+              <span className="font-semibold text-stone-700">النقدية غير الموزعة (درج الكاش):</span>
+              <span
+                className={`font-mono font-black ${
+                  isAllocationOverBudget ? 'text-rose-600' : 'text-emerald-700'
+                }`}
+              >
+                {formatEGP(remainingCashCents)}
+              </span>
+            </div>
+            {isAllocationOverBudget && (
+              <div className="text-[11px] font-bold text-rose-600 mt-1 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>المبالغ الموزعة على الماكينات تتجاوز إجمالي رصيد بداية اليوم!</span>
+              </div>
+            )}
           </div>
 
           {error && (
@@ -206,15 +273,15 @@ export const StartDayModal: React.FC = () => {
             <button
               id="confirm-start-day-btn"
               type="submit"
-              disabled={activeDay?.status === 'OPEN' || isSubmitting}
+              disabled={activeDay?.status === 'OPEN' || isSubmitting || isAllocationOverBudget}
               className={`flex-1 py-3.5 px-4 font-bold text-sm rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 ${
-                activeDay?.status === 'OPEN' || isSubmitting
+                activeDay?.status === 'OPEN' || isSubmitting || isAllocationOverBudget
                   ? 'bg-stone-200 text-stone-400 cursor-not-allowed'
                   : 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer'
               }`}
             >
               <Play className="w-4 h-4 fill-white" />
-              <span>{isSubmitting ? 'جاري بدء اليوم الجديد...' : 'بدء اليوم الجديد'}</span>
+              <span>{isSubmitting ? 'جاري بدء اليوم الجديد...' : 'تأكيد وبدء اليوم الجديد'}</span>
             </button>
 
             <button
