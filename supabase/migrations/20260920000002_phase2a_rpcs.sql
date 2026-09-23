@@ -65,8 +65,17 @@ BEGIN
   -- 5. Validate elements in machine openings payload
   FOR v_item IN SELECT * FROM jsonb_array_elements(p_machine_openings)
   LOOP
+    IF jsonb_typeof(v_item) <> 'object' THEN
+      RAISE EXCEPTION 'ERR_INVALID_PAYLOAD: Machine opening item must be a JSON object';
+    END IF;
+
     v_item_id := trim(COALESCE(v_item->>'id', ''));
     v_item_name := trim(COALESCE(v_item->>'name', ''));
+
+    IF (v_item->>'opening_balance_cents') IS NULL OR (v_item->>'opening_balance_cents') !~ '^\d+$' THEN
+      RAISE EXCEPTION 'ERR_INVALID_AMOUNT: Machine opening balance cannot be negative';
+    END IF;
+
     v_item_cents := (v_item->>'opening_balance_cents')::BIGINT;
 
     IF v_item_id = '' THEN
@@ -75,10 +84,6 @@ BEGIN
 
     IF v_item_name = '' THEN
       RAISE EXCEPTION 'ERR_INVALID_MACHINE: Machine name cannot be empty';
-    END IF;
-
-    IF v_item_cents IS NULL OR v_item_cents < 0 THEN
-      RAISE EXCEPTION 'ERR_INVALID_AMOUNT: Machine opening balance cannot be negative';
     END IF;
 
     IF v_item_id = 'm-cash-drawer' THEN
@@ -388,6 +393,10 @@ BEGIN
     RAISE EXCEPTION 'ERR_INVALID_MACHINE';
   END IF;
 
+  IF p_is_active IS NULL THEN
+    RAISE EXCEPTION 'ERR_INVALID_PAYLOAD: is_active cannot be null';
+  END IF;
+
   -- 2. Cash Drawer cannot be deactivated
   IF v_trimmed_id = 'm-cash-drawer' AND p_is_active = FALSE THEN
     RAISE EXCEPTION 'ERR_CANNOT_DISABLE_CASH_DRAWER';
@@ -601,7 +610,7 @@ BEGIN
   IF v_transactions IS NOT NULL AND jsonb_typeof(v_transactions) = 'array' THEN
     FOR v_item IN SELECT * FROM jsonb_array_elements(v_transactions)
     LOOP
-      IF (v_item->>'amount_cents')::BIGINT <= 0 THEN
+      IF (v_item->>'amount_cents') IS NULL OR (v_item->>'amount_cents') !~ '^\d+$' OR (v_item->>'amount_cents')::BIGINT <= 0 THEN
         RAISE EXCEPTION 'ERR_INVALID_AMOUNT: Transaction amount must be positive';
       END IF;
 
