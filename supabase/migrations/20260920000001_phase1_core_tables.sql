@@ -6,17 +6,6 @@
 -- No RPCs, no triggers, no seed data, no derived stored balances.
 -- ==============================================================================
 
--- Ensure auth schema exists (standard in Supabase)
-CREATE SCHEMA IF NOT EXISTS auth;
-
--- In standard Supabase, auth.users exists. For standalone or test environments,
--- define auth.users reference table if not already present.
-CREATE TABLE IF NOT EXISTS auth.users (
-  id UUID PRIMARY KEY,
-  email TEXT UNIQUE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 -- ==============================================================================
 -- TABLE 1: days
 -- Authoritative daily lifecycle and business opening balance.
