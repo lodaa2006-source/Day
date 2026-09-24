@@ -1,4 +1,5 @@
 import React from 'react';
+import { AuthProvider } from './context/AuthContext';
 import { CashProvider, useCash } from './context/CashContext';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
@@ -40,12 +41,14 @@ const MainContent: React.FC = () => {
 
 export default function App() {
   return (
-    <CashProvider>
-      <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col selection:bg-emerald-100 selection:text-emerald-900 pb-8 sm:pb-12">
-        <Header />
-        <MainContent />
-        <BottomNav />
-      </div>
-    </CashProvider>
+    <AuthProvider>
+      <CashProvider>
+        <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col selection:bg-emerald-100 selection:text-emerald-900 pb-8 sm:pb-12">
+          <Header />
+          <MainContent />
+          <BottomNav />
+        </div>
+      </CashProvider>
+    </AuthProvider>
   );
 }
