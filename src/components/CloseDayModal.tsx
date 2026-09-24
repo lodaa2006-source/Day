@@ -35,7 +35,7 @@ export const CloseDayModal: React.FC = () => {
   const currentCountedCents = !parsed.error && parsed.cents >= 0 ? parsed.cents : null;
   const differenceCents = currentCountedCents !== null ? currentCountedCents - dailySummary.expectedBalanceCents : null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setError(null);
@@ -47,8 +47,8 @@ export const CloseDayModal: React.FC = () => {
 
     setIsSubmitting(true);
     try {
+      await closeDay(currentCountedCents, notes);
       setActualCounted(currentCountedCents);
-      closeDay(currentCountedCents, notes);
       setIsCloseDayModalOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'حدث خطأ أثناء إغلاق اليوم');

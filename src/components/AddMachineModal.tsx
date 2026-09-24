@@ -8,11 +8,14 @@ export const AddMachineModal: React.FC = () => {
   const [name, setName] = useState('');
   const [initialBalanceInput, setInitialBalanceInput] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isAddMachineOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     if (!name.trim()) {
       setError('برجاء كتابة اسم الماكينة أو الحساب');
       return;
@@ -38,14 +41,19 @@ export const AddMachineModal: React.FC = () => {
       return;
     }
 
+    setIsSubmitting(true);
+    setError(null);
+
     try {
-      addMachine(name.trim(), initialCents);
+      await addMachine(name.trim(), initialCents);
       setName('');
       setInitialBalanceInput('');
       setError(null);
       setIsAddMachineOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'حدث خطأ أثناء إضافة الماكينة');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -56,7 +64,7 @@ export const AddMachineModal: React.FC = () => {
       id="add-machine-modal-backdrop"
       className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
-        if (e.target === e.currentTarget) setIsAddMachineOpen(false);
+        if (!isSubmitting && e.target === e.currentTarget) setIsAddMachineOpen(false);
       }}
     >
       <div
@@ -76,8 +84,9 @@ export const AddMachineModal: React.FC = () => {
           <button
             id="close-machine-modal-btn"
             type="button"
+            disabled={isSubmitting}
             onClick={() => setIsAddMachineOpen(false)}
-            className="w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-600 flex items-center justify-center transition-colors"
+            className="w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 disabled:opacity-50 text-stone-600 flex items-center justify-center transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -92,12 +101,13 @@ export const AddMachineModal: React.FC = () => {
               id="machine-name-input"
               type="text"
               value={name}
+              disabled={isSubmitting}
               onChange={(e) => {
                 setName(e.target.value);
                 setError(null);
               }}
               placeholder="مثال: ماكينة أمان، محفظة إلكترونية، خزينة فرعية..."
-              className="w-full text-sm font-semibold p-2.5 bg-stone-50 border-2 border-stone-200 rounded-xl focus:outline-none focus:border-stone-900 focus:bg-white"
+              className="w-full text-sm font-semibold p-2.5 bg-stone-50 border-2 border-stone-200 rounded-xl focus:outline-none focus:border-stone-900 focus:bg-white disabled:opacity-50"
               autoFocus
             />
           </div>
@@ -111,13 +121,14 @@ export const AddMachineModal: React.FC = () => {
                 id="machine-initial-balance-input"
                 type="text"
                 inputMode="decimal"
+                disabled={isSubmitting}
                 value={initialBalanceInput}
                 onChange={(e) => {
                   setInitialBalanceInput(e.target.value);
                   setError(null);
                 }}
                 placeholder="0.00"
-                className="w-full text-lg font-bold font-mono py-2.5 ps-3 pe-12 bg-stone-50 border-2 border-stone-200 rounded-xl focus:outline-none focus:border-stone-900 focus:bg-white"
+                className="w-full text-lg font-bold font-mono py-2.5 ps-3 pe-12 bg-stone-50 border-2 border-stone-200 rounded-xl focus:outline-none focus:border-stone-900 focus:bg-white disabled:opacity-50"
               />
               <span className="absolute end-3 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-400 font-mono">
                 ج.م
@@ -145,17 +156,19 @@ export const AddMachineModal: React.FC = () => {
             <button
               id="save-machine-btn"
               type="submit"
-              className="flex-1 py-3 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs sm:text-sm rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              disabled={isSubmitting}
+              className="flex-1 py-3 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
             >
               <Check className="w-4 h-4 stroke-[3]" />
-              <span>حفظ وإضافة الماكينة</span>
+              <span>{isSubmitting ? 'جاري الحفظ...' : 'حفظ وإضافة الماكينة'}</span>
             </button>
 
             <button
               id="cancel-machine-btn"
               type="button"
+              disabled={isSubmitting}
               onClick={() => setIsAddMachineOpen(false)}
-              className="py-3 px-4 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs rounded-xl transition-colors"
+              className="py-3 px-4 bg-stone-100 hover:bg-stone-200 disabled:opacity-50 text-stone-700 font-bold text-xs rounded-xl transition-colors cursor-pointer"
             >
               إلغاء
             </button>

@@ -6,6 +6,9 @@ import {
   ArrowUpDown,
   ShieldCheck,
   Edit2,
+  Edit3,
+  Power,
+  PowerOff,
   ArrowDownLeft,
   ArrowUpRight,
   ArrowLeftRight,
@@ -14,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useCash } from '../context/CashContext';
 import { formatCurrency, formatEGP, parseAmountToCents, fromCents } from '../utils/money';
+import { MachineAccount } from '../types';
 
 export const MachinesView: React.FC = () => {
   const {
@@ -22,6 +26,8 @@ export const MachinesView: React.FC = () => {
     transactions,
     setIsAddMachineOpen,
     deleteMachine,
+    renameMachine,
+    setMachineActive,
     updateMachineInitialBalance,
     dailySummary,
     currentDay,
@@ -29,6 +35,10 @@ export const MachinesView: React.FC = () => {
 
   const [editingMachineId, setEditingMachineId] = useState<string | null>(null);
   const [initialBalanceInput, setInitialBalanceInput] = useState<string>('');
+  const [editingMachineNameId, setEditingMachineNameId] = useState<string | null>(null);
+  const [machineNameInput, setMachineNameInput] = useState<string>('');
+  const [isRenaming, setIsRenaming] = useState<boolean>(false);
+  const [isTogglingActive, setIsTogglingActive] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
 
   // Total balance currently in all machines combined
@@ -36,16 +46,78 @@ export const MachinesView: React.FC = () => {
     return acc + (machineBalances[m.id] ?? m.initialBalanceCents);
   }, 0);
 
-  const handleDeleteMachine = (id: string, name: string) => {
-    const hasTransactions = transactions.some(
-      (tx) => tx.sourceMachineAccountId === id || tx.destinationMachineAccountId === id
-    );
-    let msg = `هل أنت متأكد من إزالة "${name}" من قائمة الماكينات؟`;
-    if (hasTransactions) {
-      msg += `\nتنبيه: هناك حركات مسجلة مرتبطة بهذه الماكينة. لن يتم حذف الحركات، بل ستبقى في السجل.`;
+  const handleStartRename = (machine: MachineAccount) => {
+    setEditingMachineNameId(machine.id);
+    setMachineNameInput(machine.name);
+    setEditError(null);
+  };
+
+  const handleSaveRename = async (id: string) => {
+    if (isRenaming) return;
+    const trimmed = machineNameInput.trim();
+    if (!trimmed) {
+      setEditError('برجاء كتابة اسم الماكينة أو الحساب');
+      return;
     }
+    setIsRenaming(true);
+    setEditError(null);
+    try {
+      await renameMachine(id, trimmed);
+      setEditingMachineNameId(null);
+      setEditError(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'حدث خطأ أثناء تعديل الاسم');
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
+  const handleToggleMachineActive = async (machine: MachineAccount) => {
+    if (isTogglingActive) return;
+    if (machine.id === 'm-cash-drawer' && machine.isActive) {
+      setEditError('لا يمكن تعطيل درج الكاش الأساسي.');
+      return;
+    }
+
+    const actionText = machine.isActive ? 'تعطيل' : 'تنشيط';
+    let msg = `هل أنت متأكد من ${actionText} "${machine.name}"؟`;
+    if (machine.isActive) {
+      const hasTransactions = transactions.some(
+        (tx) => tx.sourceMachineAccountId === machine.id || tx.destinationMachineAccountId === machine.id
+      );
+      if (hasTransactions) {
+        msg += `\nتنبيه: ستبقى الحركات المسجلة السابقة محفوظة بدقة في السجل.`;
+      }
+      const curBal = machineBalances[machine.id] ?? machine.initialBalanceCents;
+      if (curBal !== 0) {
+        msg += `\nتنبيه: رصيد الماكينة الحالي (${formatCurrency(curBal)}). يشترط تصفير الرصيد للتعطيل.`;
+      }
+    }
+
     if (window.confirm(msg)) {
-      deleteMachine(id);
+      setIsTogglingActive(machine.id);
+      setEditError(null);
+      try {
+        await setMachineActive(machine.id, !machine.isActive);
+      } catch (err) {
+        setEditError(err instanceof Error ? err.message : `حدث خطأ أثناء ${actionText} الماكينة`);
+      } finally {
+        setIsTogglingActive(null);
+      }
+    }
+  };
+
+  const handleDeleteMachine = (id: string, name: string) => {
+    const target = machines.find((m) => m.id === id);
+    if (target) {
+      handleToggleMachineActive(target);
+    } else {
+      let msg = `هل أنت متأكد من إزالة "${name}" من قائمة الماكينات؟`;
+      if (window.confirm(msg)) {
+        deleteMachine(id).catch((err) => {
+          setEditError(err instanceof Error ? err.message : 'حدث خطأ أثناء حذف الماكينة');
+        });
+      }
     }
   };
 
@@ -188,15 +260,69 @@ export const MachinesView: React.FC = () => {
                 <div
                   key={machine.id}
                   id={`machine-card-${machine.id}`}
-                  className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs hover:border-stone-300 transition-colors flex flex-col justify-between"
+                  className={`bg-white rounded-xl p-4 border shadow-xs hover:border-stone-300 transition-colors flex flex-col justify-between ${
+                    machine.isActive ? 'border-stone-200' : 'border-stone-300 bg-stone-50/60 opacity-90'
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-stone-900 text-amber-400 flex items-center justify-center font-bold text-sm shadow-xs">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-stone-900 text-amber-400 flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
                         {machine.name.slice(0, 2)}
                       </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-stone-900">{machine.name}</h4>
+                      <div className="flex-1 min-w-0">
+                        {editingMachineNameId === machine.id ? (
+                          <div className="flex items-center gap-1.5 my-0.5">
+                            <input
+                              id={`rename-machine-input-${machine.id}`}
+                              type="text"
+                              value={machineNameInput}
+                              disabled={isRenaming}
+                              onChange={(e) => setMachineNameInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSaveRename(machine.id);
+                                if (e.key === 'Escape') setEditingMachineNameId(null);
+                              }}
+                              className="text-xs font-bold p-1 bg-stone-100 border border-stone-300 rounded focus:outline-none focus:border-stone-900 w-full max-w-[160px]"
+                              autoFocus
+                            />
+                            <button
+                              id={`save-rename-machine-${machine.id}`}
+                              type="button"
+                              disabled={isRenaming}
+                              onClick={() => handleSaveRename(machine.id)}
+                              className="p-1 bg-stone-900 text-white rounded hover:bg-stone-800 disabled:opacity-50 cursor-pointer"
+                              title="حفظ الاسم"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              id={`cancel-rename-machine-${machine.id}`}
+                              type="button"
+                              disabled={isRenaming}
+                              onClick={() => {
+                                setEditingMachineNameId(null);
+                                setEditError(null);
+                              }}
+                              className="p-1 bg-stone-200 text-stone-600 rounded hover:bg-stone-300 disabled:opacity-50 cursor-pointer"
+                              title="إلغاء"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="text-sm font-bold text-stone-900 truncate">{machine.name}</h4>
+                            <span
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${
+                                machine.isActive
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-stone-100 text-stone-500 border-stone-200'
+                              }`}
+                            >
+                              {machine.isActive ? 'نشطة' : 'معطلة'}
+                            </span>
+                          </div>
+                        )}
                         <div className="flex items-center gap-1.5 text-[11px] text-stone-500 mt-0.5">
                           <ArrowUpDown className="w-3 h-3 text-stone-400" />
                           <span>{txCount} حركة مسجلة</span>
@@ -204,7 +330,17 @@ export const MachinesView: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        id={`rename-machine-${machine.id}`}
+                        type="button"
+                        onClick={() => handleStartRename(machine)}
+                        title="إعادة تسمية الماكينة"
+                        className="p-1.5 text-stone-400 hover:text-stone-700 hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+
                       <button
                         id={`edit-initial-machine-${machine.id}`}
                         type="button"
@@ -218,11 +354,16 @@ export const MachinesView: React.FC = () => {
                       <button
                         id={`delete-machine-${machine.id}`}
                         type="button"
-                        onClick={() => handleDeleteMachine(machine.id, machine.name)}
-                        title="إزالة الماكينة"
-                        className="p-1.5 text-stone-300 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                        disabled={isTogglingActive === machine.id}
+                        onClick={() => handleToggleMachineActive(machine)}
+                        title={machine.isActive ? 'تعطيل الماكينة' : 'تنشيط الماكينة'}
+                        className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                          machine.isActive
+                            ? 'text-stone-400 hover:text-rose-600 hover:bg-rose-50'
+                            : 'text-emerald-600 hover:bg-emerald-50'
+                        } disabled:opacity-50`}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        {machine.isActive ? <PowerOff className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
                       </button>
                     </div>
                   </div>

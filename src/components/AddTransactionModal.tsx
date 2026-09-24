@@ -73,7 +73,7 @@ export const AddTransactionModal: React.FC = () => {
 
   const categories = kind === 'INCOME' ? DEFAULT_INCOME_CATEGORIES : DEFAULT_EXPENSE_CATEGORIES;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setErrorMessage(null);
@@ -128,7 +128,7 @@ export const AddTransactionModal: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      addTransaction({
+      await addTransaction({
         transactionKind: kind,
         category: finalCategory,
         amountCents: parsedAmount.cents,

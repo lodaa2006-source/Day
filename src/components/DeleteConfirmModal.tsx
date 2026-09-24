@@ -23,15 +23,16 @@ export const DeleteConfirmModal: React.FC = () => {
 
   const deleteCheck = canDeleteTransaction(deletingTransaction, machineBalances, machineNamesObj);
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (isDeleting) return;
     if (!deleteCheck.allowed) {
       setErrorMessage(deleteCheck.error || 'لا يمكن حذف هذه الحركة');
       return;
     }
     setIsDeleting(true);
+    setErrorMessage(null);
     try {
-      deleteTransaction(deletingTransaction.id);
+      await deleteTransaction(deletingTransaction.id);
       setDeletingTransaction(null);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'فشل حذف الحركة');

@@ -19,13 +19,16 @@ export const EditOpeningBalanceModal: React.FC = () => {
     String(fromCents(openingBalanceCents))
   );
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isEditOpeningBalanceOpen) return null;
 
   const allocatedCents = dailySummary.allocatedOpeningCents ?? 0;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     if (isCurrentDayClosed) {
       setError('لا يمكن تعديل رصيد البداية ليوم مغلق.');
       return;
@@ -49,12 +52,15 @@ export const EditOpeningBalanceModal: React.FC = () => {
       return;
     }
 
+    setIsSubmitting(true);
     try {
-      setOpeningBalance(parsed.cents);
+      await setOpeningBalance(parsed.cents);
       setError(null);
       setIsEditOpeningBalanceOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'حدث خطأ أثناء تعديل رصيد البداية');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -156,22 +162,23 @@ export const EditOpeningBalanceModal: React.FC = () => {
             <button
               id="save-opening-balance-btn"
               type="submit"
-              disabled={isCurrentDayClosed}
+              disabled={isCurrentDayClosed || isSubmitting}
               className={`flex-1 py-3 px-4 font-bold text-xs sm:text-sm rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2 ${
-                isCurrentDayClosed
+                isCurrentDayClosed || isSubmitting
                   ? 'bg-stone-300 text-stone-500 cursor-not-allowed'
                   : 'bg-stone-900 hover:bg-black text-white cursor-pointer'
               }`}
             >
               <Check className="w-4 h-4 stroke-[3]" />
-              <span>تحديث رصيد البداية</span>
+              <span>{isSubmitting ? 'جاري تحديث الرصيد...' : 'تحديث رصيد البداية'}</span>
             </button>
 
             <button
               id="cancel-opening-balance-btn"
               type="button"
+              disabled={isSubmitting}
               onClick={() => setIsEditOpeningBalanceOpen(false)}
-              className="py-3 px-4 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs rounded-xl transition-colors"
+              className="py-3 px-4 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs rounded-xl transition-colors disabled:opacity-50"
             >
               إلغاء
             </button>

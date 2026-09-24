@@ -62,7 +62,7 @@ export const StartDayModal: React.FC = () => {
     setError(null);
   };
 
-  const handleStart = (e: React.FormEvent) => {
+  const handleStart = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setError(null);
@@ -98,7 +98,7 @@ export const StartDayModal: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      startNextDay(businessParsed.cents, machineOpeningsMap);
+      await startNextDay(businessParsed.cents, machineOpeningsMap);
       setIsStartDayModalOpen(false);
       setOpeningInput('');
       setMachineInputs({});

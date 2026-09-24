@@ -22,6 +22,26 @@ import {
   NavTab,
   Day,
 } from '../types';
+import { AuthContext } from './AuthContext';
+import { isSupabaseConfigured } from '../lib/supabase';
+import { fetchAllFinancialData } from '../lib/supabaseData';
+import {
+  addIncomeRpc,
+  addExpenseRpc,
+  addTransferRpc,
+  updateTransactionRpc,
+  deleteTransactionRpc,
+} from '../lib/supabaseTransactions';
+import {
+  createMachineRpc,
+  renameMachineRpc,
+  setMachineActiveRpc,
+} from '../lib/supabaseMachines';
+import {
+  startNextDayRpc,
+  setOpeningBalanceRpc,
+  closeDayRpc,
+} from '../lib/supabaseDayLifecycle';
 import {
   calculateDailySummary,
   calculateMachineBalance,
@@ -50,8 +70,8 @@ interface CashContextType {
   isViewingHistoricalDay: boolean;
 
   // Day Lifecycle Actions
-  startNextDay: (openingBusinessCents: number, machineOpenings?: Record<string, number>) => Day;
-  closeDay: (actualCountedCents: number, notes?: string) => void;
+  startNextDay: (openingBusinessCents: number, machineOpenings?: Record<string, number>, businessDate?: string) => Promise<Day>;
+  closeDay: (actualCountedCents: number, notes?: string) => Promise<void>;
 
   // Modals
   isAddTransactionOpen: boolean;
@@ -73,7 +93,7 @@ interface CashContextType {
 
   // Financial State for Currently Active/Viewed Day
   openingBalanceCents: number;
-  setOpeningBalance: (cents: number) => void;
+  setOpeningBalance: (cents: number, machineOpenings?: Record<string, number>) => Promise<void>;
   transactions: Transaction[]; // Transactions for current viewed day
   allTransactions: Transaction[]; // All transactions across all days
   machines: MachineAccount[];
@@ -81,18 +101,25 @@ interface CashContextType {
   setActualCounted: (cents: number | null) => void;
 
   // CRUD Operations
-  addTransaction: (tx: TransactionInput) => Transaction;
-  updateTransaction: (id: string, tx: TransactionInput) => Transaction;
-  deleteTransaction: (id: string) => void;
-  addMachine: (name: string, initialBalanceCents?: number) => MachineAccount;
+  addTransaction: (tx: TransactionInput) => Promise<Transaction>;
+  updateTransaction: (id: string, tx: TransactionInput) => Promise<Transaction>;
+  deleteTransaction: (id: string) => Promise<void>;
+  addMachine: (name: string, initialBalanceCents?: number) => Promise<MachineAccount>;
+  renameMachine: (id: string, newName: string) => Promise<void>;
+  setMachineActive: (id: string, isActive: boolean) => Promise<void>;
   updateMachineInitialBalance: (id: string, initialBalanceCents: number) => void;
-  deleteMachine: (id: string) => void;
+  deleteMachine: (id: string) => Promise<void>;
   clearAllData: () => void;
 
   // Derived Financial Computations for Current Day
   dailySummary: DailySummary;
   machineBalances: Record<string, number>;
   reconciliation: Reconciliation;
+
+  // Supabase Read-Only Integration State
+  isLoadingSupabaseData?: boolean;
+  supabaseDataError?: string | null;
+  refreshSupabaseData?: () => Promise<void>;
 }
 
 const STORAGE_KEYS = {
@@ -246,6 +273,48 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return [];
   });
 
+  // Supabase Read-Only Integration State
+  const auth = useContext(AuthContext);
+  const [isLoadingSupabaseData, setIsLoadingSupabaseData] = useState<boolean>(isSupabaseConfigured);
+  const [supabaseDataError, setSupabaseDataError] = useState<string | null>(null);
+
+  const refreshSupabaseData = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      setIsLoadingSupabaseData(false);
+      return;
+    }
+    setIsLoadingSupabaseData(true);
+    setSupabaseDataError(null);
+    try {
+      const data = await fetchAllFinancialData();
+      if (data) {
+        setDays(data.days);
+        setMachines(data.machines);
+        setAllTransactions(data.transactions);
+        if (data.activeDayId) {
+          setActiveDayId(data.activeDayId);
+        } else {
+          const openDay = data.days.find((d) => d.status === 'OPEN');
+          setActiveDayId(openDay ? openDay.id : data.days.length > 0 ? data.days[data.days.length - 1].id : null);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'فشل قراءة البيانات من Supabase';
+      console.error('Error reading Supabase financial data:', msg);
+      setSupabaseDataError(msg);
+    } finally {
+      setIsLoadingSupabaseData(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (auth?.isAuthenticated) {
+      refreshSupabaseData();
+    } else if (auth && !auth.loading && !isSupabaseConfigured) {
+      setIsLoadingSupabaseData(false);
+    }
+  }, [auth?.isAuthenticated, auth?.loading, refreshSupabaseData]);
+
   // Determine current active Day and currently viewed Day
   const activeDay = useMemo(() => {
     return days.find((d) => d.id === activeDayId) || days[days.length - 1] || null;
@@ -344,16 +413,28 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Actions
   const setOpeningBalance = useCallback(
-    (cents: number) => {
+    async (cents: number, machineOpenings?: Record<string, number>): Promise<void> => {
       const safeAmount = Math.max(0, Math.round(cents));
-      if (!currentDay) return;
+      if (!currentDay) {
+        throw new Error('لا يوجد يوم نشط لتعديل رصيد بدايته.');
+      }
       if (currentDay.status === 'CLOSED') {
         throw new Error('لا يمكن تعديل رصيد البداية ليوم مغلق.');
       }
 
       // Financial rule:
       // Opening Business Balance must never be less than already allocated machine money!
-      const totalAllocated = Object.values(currentDay.machineOpeningBalances || {}).reduce(
+      let nextMachineOpeningBalances = currentDay.machineOpeningBalances || {};
+      if (machineOpenings) {
+        nextMachineOpeningBalances = {};
+        for (const m of machines) {
+          if (!m.isActive) continue;
+          const userVal = machineOpenings[m.id];
+          nextMachineOpeningBalances[m.id] = userVal !== undefined ? Math.max(0, Math.round(userVal)) : 0;
+        }
+      }
+
+      const totalAllocated = Object.values(nextMachineOpeningBalances).reduce(
         (acc, val) => safeAdd(acc, val),
         0
       );
@@ -363,20 +444,49 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // Machine allocations are preserved. The unallocated portion is derived as:
-      // safeSubtract(safeAmount, totalAllocated)
+      // Authoritative Supabase integration
+      if (isSupabaseConfigured) {
+        let openingsPayload = null;
+        if (machineOpenings) {
+          openingsPayload = Object.entries(machineOpenings).map(([id, amount]) => ({
+            id,
+            opening_balance_cents: Math.max(0, Math.round(amount)),
+          }));
+        }
+
+        await setOpeningBalanceRpc({
+          dayId: currentDay.id,
+          newOpeningBusinessCents: safeAmount,
+          machineOpenings: openingsPayload,
+        });
+
+        // Refresh authoritative Supabase financial data after success
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+        }
+        return;
+      }
+
+      // Offline / unconfigured fallback
       setDays((prev) =>
         prev.map((d) =>
           d.id === currentDay.id
             ? {
                 ...d,
                 openingBusinessBalanceCents: safeAmount,
+                machineOpeningBalances: nextMachineOpeningBalances,
               }
             : d
         )
       );
     },
-    [currentDay]
+    [currentDay, machines]
   );
 
   const setActualCounted = useCallback(
@@ -395,7 +505,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Day Lifecycle: Close Day
   const closeDay = useCallback(
-    (countedCents: number, notes?: string) => {
+    async (countedCents: number, notes?: string): Promise<void> => {
       if (!activeDay) {
         throw new Error('لا يوجد يوم نشط للإغلاق.');
       }
@@ -404,8 +514,30 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       const safeCounted = Math.max(0, Math.round(countedCents));
-      const now = new Date().toISOString();
 
+      // Authoritative Supabase integration
+      if (isSupabaseConfigured) {
+        await closeDayRpc({
+          dayId: activeDay.id,
+          actualClosingCents: safeCounted,
+          notes: notes ? notes.trim() : null,
+        });
+
+        // Refresh authoritative Supabase financial data after success
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+        }
+        return;
+      }
+
+      // Offline / unconfigured fallback
+      const now = new Date().toISOString();
       setDays((prev) =>
         prev.map((d) => {
           if (d.id === activeDay.id) {
@@ -426,7 +558,11 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Day Lifecycle: Start Next Day (Manual Entry Only)
   const startNextDay = useCallback(
-    (openingBusinessCents: number, machineOpenings?: Record<string, number>): Day => {
+    async (
+      openingBusinessCents: number,
+      machineOpenings?: Record<string, number>,
+      businessDate?: string
+    ): Promise<Day> => {
       const lastDay = days[days.length - 1] || activeDay || null;
       const safeOpening = Math.max(0, Math.round(openingBusinessCents));
 
@@ -458,7 +594,66 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      const todayStr = new Date().toISOString().split('T')[0];
+      // Determine business date (must strictly be greater than latest day date for Supabase)
+      let targetDate = businessDate;
+      if (!targetDate) {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const lastDate = lastDay?.date ? String(lastDay.date).slice(0, 10) : '';
+        if (lastDate && todayStr <= lastDate) {
+          const d = new Date(lastDate);
+          d.setUTCDate(d.getUTCDate() + 1);
+          targetDate = d.toISOString().split('T')[0];
+        } else {
+          targetDate = todayStr;
+        }
+      }
+
+      // Authoritative Supabase integration
+      if (isSupabaseConfigured) {
+        const payload = Object.entries(nextMachineOpeningBalances).map(([id, cents]) => ({
+          id,
+          opening_balance_cents: cents,
+        }));
+
+        const rpcResult = await startNextDayRpc({
+          businessDate: targetDate,
+          openingBusinessCents: safeOpening,
+          machineOpenings: payload,
+        });
+
+        // Refresh authoritative Supabase financial data after success
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+            setViewingDayId(freshData.activeDayId);
+          }
+          const createdDay = freshData.days.find((d) => d.id === rpcResult.day_id);
+          if (createdDay) return createdDay;
+        }
+
+        const fallbackDay: Day = {
+          id: rpcResult.day_id,
+          date: rpcResult.business_date,
+          status: 'OPEN',
+          openingBusinessBalanceCents: rpcResult.opening_business_cents,
+          actualClosingBalanceCents: null,
+          machineOpeningBalances: nextMachineOpeningBalances,
+          createdAt: new Date().toISOString(),
+          closedAt: null,
+        };
+
+        setDays((prev) => [...prev, fallbackDay]);
+        setActiveDayId(fallbackDay.id);
+        setViewingDayId(fallbackDay.id);
+        return fallbackDay;
+      }
+
+      // Offline / unconfigured fallback
+      const todayStr = targetDate;
       const newDayId = `day-${todayStr}-${Date.now().toString(36).substring(2, 6)}`;
       const now = new Date().toISOString();
 
@@ -484,7 +679,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Transaction CRUD strictly bound to active day
   const addTransaction = useCallback(
-    (input: TransactionInput): Transaction => {
+    async (input: TransactionInput): Promise<Transaction> => {
       if (!activeDay) {
         throw new Error('لا يوجد يوم نشط حالياً. برجاء بدء يوم جديد أولاً.');
       }
@@ -503,6 +698,88 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error(validation.error || 'بيانات الحركة غير صالحة');
       }
 
+      // Authoritative Supabase persistence
+      if (isSupabaseConfigured) {
+        const timestamp = input.timestamp || new Date().toISOString();
+        let rpcResult;
+
+        if (input.transactionKind === 'INCOME') {
+          if (!input.destinationMachineAccountId) {
+            throw new Error('يجب تحديد ماكينة أو حساب استلام النقدية');
+          }
+          rpcResult = await addIncomeRpc({
+            dayId: activeDay.id,
+            destId: input.destinationMachineAccountId,
+            amountCents: input.amountCents,
+            category: input.category,
+            description: input.description,
+            timestamp,
+          });
+        } else if (input.transactionKind === 'EXPENSE') {
+          if (!input.sourceMachineAccountId) {
+            throw new Error('يجب تحديد ماكينة أو حساب المصدر للخصم منه');
+          }
+          rpcResult = await addExpenseRpc({
+            dayId: activeDay.id,
+            sourceId: input.sourceMachineAccountId,
+            amountCents: input.amountCents,
+            category: input.category,
+            description: input.description,
+            timestamp,
+          });
+        } else if (input.transactionKind === 'TRANSFER') {
+          if (!input.sourceMachineAccountId) {
+            throw new Error('يجب اختيار الماكينة المحول منها');
+          }
+          if (!input.destinationMachineAccountId) {
+            throw new Error('يجب اختيار الماكينة المحول إليها');
+          }
+          if (input.sourceMachineAccountId === input.destinationMachineAccountId) {
+            throw new Error('لا يمكن التحويل من وإلى نفس الماكينة / الحساب');
+          }
+          rpcResult = await addTransferRpc({
+            dayId: activeDay.id,
+            sourceId: input.sourceMachineAccountId,
+            destId: input.destinationMachineAccountId,
+            amountCents: input.amountCents,
+            category: input.category,
+            description: input.description,
+            timestamp,
+          });
+        } else {
+          throw new Error('نوع حركة غير معروف');
+        }
+
+        // Safe post-write refresh of the authoritative Supabase data
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+          const savedTx = freshData.transactions.find((t) => t.id === rpcResult.transaction_id);
+          if (savedTx) return savedTx;
+        }
+
+        const fallbackTx: Transaction = {
+          id: rpcResult.transaction_id,
+          dayId: activeDay.id,
+          transactionKind: input.transactionKind,
+          category: input.category.trim(),
+          amountCents: input.amountCents,
+          description: input.description ? input.description.trim() : '',
+          sourceMachineAccountId: input.transactionKind !== 'INCOME' ? input.sourceMachineAccountId : undefined,
+          destinationMachineAccountId: input.transactionKind !== 'EXPENSE' ? input.destinationMachineAccountId : undefined,
+          timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return fallbackTx;
+      }
+
+      // Offline / Unconfigured fallback
       const now = new Date().toISOString();
       const newTx: Transaction = {
         id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -525,7 +802,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const updateTransaction = useCallback(
-    (id: string, input: TransactionInput): Transaction => {
+    async (id: string, input: TransactionInput): Promise<Transaction> => {
       const existing = allTransactions.find((t) => t.id === id);
       if (!existing) {
         throw new Error('الحركة المطلوب تعديلها غير موجودة.');
@@ -536,6 +813,48 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('لا يمكن تعديل حركة تابعة ليوم مغلق.');
       }
 
+      // Authoritative Supabase persistence
+      if (isSupabaseConfigured) {
+        const rpcResult = await updateTransactionRpc({
+          transactionId: id,
+          newKind: input.transactionKind,
+          newAmountCents: input.amountCents,
+          newCategory: input.category,
+          newDescription: input.description,
+          newSourceId: input.transactionKind !== 'INCOME' ? (input.sourceMachineAccountId || null) : null,
+          newDestId: input.transactionKind !== 'EXPENSE' ? (input.destinationMachineAccountId || null) : null,
+        });
+
+        // Safe post-write refresh of authoritative Supabase data
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+          const savedTx = freshData.transactions.find((t) => t.id === rpcResult.transaction_id);
+          if (savedTx) return savedTx;
+        }
+
+        const fallbackTx: Transaction = {
+          id: rpcResult.transaction_id,
+          dayId: rpcResult.day_id,
+          transactionKind: rpcResult.kind,
+          category: input.category.trim(),
+          amountCents: rpcResult.amount,
+          description: input.description ? input.description.trim() : '',
+          sourceMachineAccountId: rpcResult.source_id || undefined,
+          destinationMachineAccountId: rpcResult.destination_id || undefined,
+          timestamp: existing.timestamp,
+          createdAt: existing.createdAt,
+          updatedAt: new Date().toISOString(),
+        };
+        return fallbackTx;
+      }
+
+      // Offline / Unconfigured fallback
       const machineNamesMap = Object.fromEntries(machines.map((m) => [m.id, m.name]));
       const validation = validateTransaction(input, {
         machineBalances,
@@ -575,15 +894,36 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const deleteTransaction = useCallback(
-    (id: string) => {
+    async (id: string): Promise<void> => {
       const existing = allTransactions.find((t) => t.id === id);
-      if (!existing) return;
+      if (!existing) {
+        throw new Error('الحركة المطلوب حذفها غير موجودة.');
+      }
 
       const targetDay = days.find((d) => d.id === existing.dayId);
       if (targetDay && targetDay.status === 'CLOSED') {
         throw new Error('لا يمكن حذف حركة تابعة ليوم مغلق.');
       }
 
+      // Authoritative Supabase persistence
+      if (isSupabaseConfigured) {
+        await deleteTransactionRpc(id);
+
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+        } else {
+          setAllTransactions((prev) => prev.filter((tx) => tx.id !== id));
+        }
+        return;
+      }
+
+      // Offline / Unconfigured fallback
       const machineNamesMap = Object.fromEntries(machines.map((m) => [m.id, m.name]));
       const check = canDeleteTransaction(existing, machineBalances, machineNamesMap);
       if (!check.allowed) {
@@ -596,7 +936,20 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const addMachine = useCallback(
-    (name: string, initialBalanceCents: number = 0): MachineAccount => {
+    async (name: string, initialBalanceCents: number = 0): Promise<MachineAccount> => {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        throw new Error('برجاء كتابة اسم الماكينة أو الحساب');
+      }
+
+      // Check duplicate name locally first
+      const duplicate = machines.find(
+        (m) => m.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (duplicate) {
+        throw new Error('اسم الماكينة مستخدم بالفعل. يرجى اختيار اسم آخر.');
+      }
+
       const safeAmount = Math.max(0, Math.round(initialBalanceCents));
 
       if (currentDay && currentDay.status === 'OPEN' && currentDay.openingBusinessBalanceCents > 0) {
@@ -614,10 +967,44 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
+      const generatedId = `m-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+      if (isSupabaseConfigured) {
+        const rpcResult = await createMachineRpc({
+          machineId: generatedId,
+          name: trimmedName,
+        });
+
+        // Authoritative refresh from Supabase
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+          const created = freshData.machines.find((m) => m.id === rpcResult.machine_id);
+          if (created) return created;
+        }
+
+        const fallbackMachine: MachineAccount = {
+          id: rpcResult.machine_id,
+          name: rpcResult.name,
+          initialBalanceCents: rpcResult.initial_balance_cents,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          isActive: rpcResult.is_active,
+        };
+        setMachines((prev) => [...prev, fallbackMachine]);
+        return fallbackMachine;
+      }
+
+      // Local / Offline fallback
       const now = new Date().toISOString();
       const newMachine: MachineAccount = {
-        id: `m-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        name: name.trim(),
+        id: generatedId,
+        name: trimmedName,
         initialBalanceCents: safeAmount,
         createdAt: now,
         updatedAt: now,
@@ -649,7 +1036,106 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return newMachine;
     },
-    [currentDay]
+    [currentDay, machines]
+  );
+
+  const renameMachine = useCallback(
+    async (id: string, newName: string): Promise<void> => {
+      const trimmedName = newName.trim();
+      if (!trimmedName) {
+        throw new Error('برجاء كتابة الاسم الجديد للماكينة');
+      }
+
+      const existing = machines.find((m) => m.id === id);
+      if (!existing) {
+        throw new Error('الماكينة المطلوب تعديلها غير موجودة بالنظام');
+      }
+
+      const duplicate = machines.find(
+        (m) => m.id !== id && m.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (duplicate) {
+        throw new Error('اسم الماكينة مستخدم بالفعل. يرجى اختيار اسم آخر.');
+      }
+
+      if (isSupabaseConfigured) {
+        await renameMachineRpc({
+          machineId: id,
+          newName: trimmedName,
+        });
+
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+        } else {
+          const now = new Date().toISOString();
+          setMachines((prev) =>
+            prev.map((m) => (m.id === id ? { ...m, name: trimmedName, updatedAt: now } : m))
+          );
+        }
+        return;
+      }
+
+      // Local / Offline fallback
+      const now = new Date().toISOString();
+      setMachines((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, name: trimmedName, updatedAt: now } : m))
+      );
+    },
+    [machines]
+  );
+
+  const setMachineActive = useCallback(
+    async (id: string, isActive: boolean): Promise<void> => {
+      const existing = machines.find((m) => m.id === id);
+      if (!existing) {
+        throw new Error('الماكينة المطلوب تغيير حالتها غير موجودة بالنظام');
+      }
+
+      if (id === 'm-cash-drawer' && !isActive) {
+        throw new Error('لا يمكن تعطيل درج الكاش الأساسي.');
+      }
+
+      if (isSupabaseConfigured) {
+        await setMachineActiveRpc({
+          machineId: id,
+          isActive,
+        });
+
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+          }
+        } else {
+          const now = new Date().toISOString();
+          setMachines((prev) =>
+            prev.map((m) => (m.id === id ? { ...m, isActive, updatedAt: now } : m))
+          );
+        }
+        return;
+      }
+
+      // Local / Offline fallback
+      const balance = machineBalances[id] ?? 0;
+      if (!isActive && balance !== 0) {
+        throw new Error('لا يمكن تعطيل الماكينة لأن رصيدها الحالي لا يساوي صفراً.');
+      }
+
+      const now = new Date().toISOString();
+      setMachines((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, isActive, updatedAt: now } : m))
+      );
+    },
+    [machineBalances, machines]
   );
 
   const updateMachineInitialBalance = useCallback(
@@ -700,7 +1186,11 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const deleteMachine = useCallback(
-    (id: string) => {
+    async (id: string): Promise<void> => {
+      if (isSupabaseConfigured) {
+        await setMachineActive(id, false);
+        return;
+      }
       const hasTxs = allTransactions.some(
         (tx) => tx.sourceMachineAccountId === id || tx.destinationMachineAccountId === id
       );
@@ -710,7 +1200,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setMachines((prev) => prev.filter((m) => m.id !== id));
     },
-    [allTransactions, machineBalances]
+    [allTransactions, machineBalances, setMachineActive]
   );
 
   const clearAllData = useCallback(() => {
@@ -772,12 +1262,17 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateTransaction,
         deleteTransaction,
         addMachine,
+        renameMachine,
+        setMachineActive,
         updateMachineInitialBalance,
         deleteMachine,
         clearAllData,
         dailySummary,
         machineBalances,
         reconciliation,
+        isLoadingSupabaseData,
+        supabaseDataError,
+        refreshSupabaseData,
       }}
     >
       {children}

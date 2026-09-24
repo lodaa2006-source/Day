@@ -47,16 +47,31 @@ export const EditTransactionModal: React.FC = () => {
 
     if (newKind === 'INCOME') {
       setCategory(DEFAULT_INCOME_CATEGORIES[0]);
+      if (!destinationMachineId && machines.length > 0) {
+        setDestinationMachineId(machines[0].id);
+      }
     } else if (newKind === 'EXPENSE') {
       setCategory(DEFAULT_EXPENSE_CATEGORIES[0]);
+      if (!sourceMachineId && machines.length > 0) {
+        setSourceMachineId(machines[0].id);
+      }
     } else {
       setCategory(DEFAULT_TRANSFER_CATEGORY);
+      if (!sourceMachineId && machines.length > 0) {
+        setSourceMachineId(machines[0].id);
+      }
+      if (!destinationMachineId && machines.length > 1) {
+        setDestinationMachineId(machines[1].id);
+      } else if (destinationMachineId === sourceMachineId && machines.length > 1) {
+        const other = machines.find((m) => m.id !== (sourceMachineId || machines[0]?.id));
+        if (other) setDestinationMachineId(other.id);
+      }
     }
   };
 
   const categories = kind === 'INCOME' ? DEFAULT_INCOME_CATEGORIES : DEFAULT_EXPENSE_CATEGORIES;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setErrorMessage(null);
@@ -94,7 +109,7 @@ export const EditTransactionModal: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      updateTransaction(editingTransaction.id, {
+      await updateTransaction(editingTransaction.id, {
         transactionKind: kind,
         category: kind === 'TRANSFER' ? DEFAULT_TRANSFER_CATEGORY : category,
         amountCents: parsed.cents,
@@ -117,7 +132,7 @@ export const EditTransactionModal: React.FC = () => {
       id="edit-transaction-modal-backdrop"
       className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
-        if (e.target === e.currentTarget) setEditingTransaction(null);
+        if (e.target === e.currentTarget && !isSubmitting) setEditingTransaction(null);
       }}
     >
       <div
@@ -132,8 +147,9 @@ export const EditTransactionModal: React.FC = () => {
           <button
             id="close-edit-tx-btn"
             type="button"
-            onClick={() => setEditingTransaction(null)}
-            className="w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-600 flex items-center justify-center transition-colors"
+            disabled={isSubmitting}
+            onClick={() => !isSubmitting && setEditingTransaction(null)}
+            className="w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-600 flex items-center justify-center transition-colors disabled:opacity-50"
           >
             <X className="w-4 h-4" />
           </button>
@@ -253,6 +269,7 @@ export const EditTransactionModal: React.FC = () => {
                 onChange={(e) => setDestinationMachineId(e.target.value)}
                 className="w-full text-xs font-bold p-2.5 bg-stone-50 border border-stone-200 rounded-xl focus:outline-none focus:border-stone-900"
               >
+                <option value="">اختر الماكينة المستلمة...</option>
                 {machines.map((m) => {
                   const bal = machineBalances[m.id] ?? m.initialBalanceCents;
                   return (
@@ -274,6 +291,7 @@ export const EditTransactionModal: React.FC = () => {
                 onChange={(e) => setSourceMachineId(e.target.value)}
                 className="w-full text-xs font-bold p-2.5 bg-stone-50 border border-stone-200 rounded-xl focus:outline-none focus:border-stone-900"
               >
+                <option value="">اختر الماكينة المصدر...</option>
                 {machines.map((m) => {
                   const bal = machineBalances[m.id] ?? m.initialBalanceCents;
                   return (
