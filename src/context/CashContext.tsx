@@ -38,6 +38,7 @@ import {
   setMachineActiveRpc,
 } from '../lib/supabaseMachines';
 import {
+  initializeFirstDayRpc,
   startNextDayRpc,
   setOpeningBalanceRpc,
   closeDayRpc,
@@ -70,6 +71,12 @@ interface CashContextType {
   isViewingHistoricalDay: boolean;
 
   // Day Lifecycle Actions
+  initializeFirstDay: (
+    openingBusinessCents: number,
+    machineOpenings?: Record<string, number>,
+    businessDate?: string,
+    extraMachines?: Array<{ id: string; name: string }>
+  ) => Promise<Day>;
   startNextDay: (openingBusinessCents: number, machineOpenings?: Record<string, number>, businessDate?: string) => Promise<Day>;
   closeDay: (actualCountedCents: number, notes?: string) => Promise<void>;
 
@@ -556,6 +563,147 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [activeDay]
   );
 
+  // Day Lifecycle: Initialize First Day
+  const initializeFirstDay = useCallback(
+    async (
+      openingBusinessCents: number,
+      machineOpenings?: Record<string, number>,
+      businessDate?: string,
+      extraMachines?: Array<{ id: string; name: string }>
+    ): Promise<Day> => {
+      const safeOpening = Math.max(0, Math.round(openingBusinessCents));
+
+      // Build machine definitions map (id -> name)
+      const machinesMap: Record<string, string> = {};
+      for (const m of machines) {
+        if (m.isActive && m.id !== 'm-cash-drawer') {
+          machinesMap[m.id] = m.name;
+        }
+      }
+      if (extraMachines) {
+        for (const em of extraMachines) {
+          if (em.id !== 'm-cash-drawer' && em.name.trim()) {
+            machinesMap[em.id] = em.name.trim();
+          }
+        }
+      }
+
+      // Collect machine opening balances
+      const nextMachineOpeningBalances: Record<string, number> = {};
+      let totalAllocatedToOtherMachines = 0;
+
+      for (const [mId] of Object.entries(machinesMap)) {
+        const userVal = machineOpenings?.[mId];
+        const cents = userVal !== undefined ? Math.max(0, Math.round(userVal)) : 0;
+        nextMachineOpeningBalances[mId] = cents;
+        totalAllocatedToOtherMachines = safeAdd(totalAllocatedToOtherMachines, cents);
+      }
+
+      if (totalAllocatedToOtherMachines > safeOpening) {
+        throw new Error(
+          `لا يمكن أن يتجاوز إجمالي المبالغ الموزعة على الماكينات (${formatEGP(totalAllocatedToOtherMachines)}) رصيد بداية النشاط (${formatEGP(safeOpening)}).`
+        );
+      }
+
+      const drawerCents = Math.max(0, safeSubtract(safeOpening, totalAllocatedToOtherMachines));
+      nextMachineOpeningBalances['m-cash-drawer'] = drawerCents;
+
+      const targetDate = businessDate || new Date().toISOString().split('T')[0];
+
+      if (isSupabaseConfigured) {
+        const payload = [
+          {
+            id: 'm-cash-drawer',
+            name: 'درج الكاش',
+            opening_balance_cents: drawerCents,
+          },
+          ...Object.entries(machinesMap).map(([id, name]) => ({
+            id,
+            name,
+            opening_balance_cents: nextMachineOpeningBalances[id] || 0,
+          })),
+        ];
+
+        const rpcResult = await initializeFirstDayRpc({
+          businessDate: targetDate,
+          openingBusinessCents: safeOpening,
+          machineOpenings: payload,
+        });
+
+        // Authoritative refresh of Supabase data after success
+        const freshData = await fetchAllFinancialData();
+        if (freshData) {
+          setDays(freshData.days);
+          setMachines(freshData.machines);
+          setAllTransactions(freshData.transactions);
+          if (freshData.activeDayId) {
+            setActiveDayId(freshData.activeDayId);
+            setViewingDayId(freshData.activeDayId);
+          }
+          const createdDay = freshData.days.find((d) => d.id === rpcResult.day_id);
+          if (createdDay) return createdDay;
+        }
+
+        const fallbackDay: Day = {
+          id: rpcResult.day_id,
+          date: rpcResult.business_date,
+          status: 'OPEN',
+          openingBusinessBalanceCents: rpcResult.opening_business_balance_cents,
+          actualClosingBalanceCents: null,
+          machineOpeningBalances: nextMachineOpeningBalances,
+          createdAt: new Date().toISOString(),
+          closedAt: null,
+        };
+
+        setDays([fallbackDay]);
+        setActiveDayId(fallbackDay.id);
+        setViewingDayId(fallbackDay.id);
+        return fallbackDay;
+      }
+
+      // Offline / unconfigured fallback
+      const newDayId = `day_${targetDate.replace(/-/g, '')}`;
+      const now = new Date().toISOString();
+
+      const drawerMachine: MachineAccount = {
+        id: 'm-cash-drawer',
+        name: 'درج الكاش',
+        initialBalanceCents: drawerCents,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const otherMachineAccounts: MachineAccount[] = Object.entries(machinesMap).map(([id, name]) => ({
+        id,
+        name,
+        initialBalanceCents: nextMachineOpeningBalances[id] || 0,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      }));
+
+      const newDay: Day = {
+        id: newDayId,
+        date: targetDate,
+        status: 'OPEN',
+        openingBusinessBalanceCents: safeOpening,
+        actualClosingBalanceCents: null,
+        machineOpeningBalances: nextMachineOpeningBalances,
+        createdAt: now,
+        closedAt: null,
+      };
+
+      setMachines([drawerMachine, ...otherMachineAccounts]);
+      setDays([newDay]);
+      setActiveDayId(newDay.id);
+      setViewingDayId(newDay.id);
+
+      return newDay;
+    },
+    [machines]
+  );
+
   // Day Lifecycle: Start Next Day (Manual Entry Only)
   const startNextDay = useCallback(
     async (
@@ -563,6 +711,11 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       machineOpenings?: Record<string, number>,
       businessDate?: string
     ): Promise<Day> => {
+      // If the system has no existing days, route cleanly to initializeFirstDay
+      if (days.length === 0) {
+        return initializeFirstDay(openingBusinessCents, machineOpenings, businessDate);
+      }
+
       const lastDay = days[days.length - 1] || activeDay || null;
       const safeOpening = Math.max(0, Math.round(openingBusinessCents));
 
@@ -1235,6 +1388,7 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setViewingDayId,
         isCurrentDayClosed,
         isViewingHistoricalDay,
+        initializeFirstDay,
         startNextDay,
         closeDay,
         isAddTransactionOpen,

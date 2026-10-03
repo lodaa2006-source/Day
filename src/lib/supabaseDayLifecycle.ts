@@ -1,9 +1,25 @@
 import { supabase, isSupabaseConfigured } from './supabase';
+import { safeAdd, safeSubtract } from '../utils/money';
 
 export interface MachineOpeningInput {
   id: string;
+  name?: string;
   opening_balance_cents: number;
   machine_account_id?: string;
+}
+
+export interface InitializeFirstDayParams {
+  businessDate: string; // DATE format YYYY-MM-DD
+  openingBusinessCents: number; // BIGINT non-negative
+  machineOpenings?: MachineOpeningInput[];
+}
+
+export interface InitializeFirstDayRpcResult {
+  success: boolean;
+  day_id: string;
+  business_date: string;
+  opening_business_balance_cents: number;
+  machine_count: number;
 }
 
 export interface StartNextDayParams {
@@ -78,6 +94,12 @@ export function mapDayLifecycleRpcError(err: { message?: string } | Error | unkn
   if (message.includes('ERR_UNAUTHENTICATED')) {
     return new Error('انتهت صلاحية جلسة الاتصال. برجاء إعادة تحميل الصفحة.');
   }
+  if (message.includes('ERR_SYSTEM_ALREADY_INITIALIZED')) {
+    return new Error('النظام مهيأ بالفعل ومسجل به يومية سابقة.');
+  }
+  if (message.includes('ERR_OPENING_SUM_MISMATCH')) {
+    return new Error('مجموع مبالغ الماكينات ودرج الكاش يجب أن يتطابق تماماً مع إجمالي رصيد بداية النشاط.');
+  }
   if (message.includes('ERR_NO_PREVIOUS_DAY')) {
     return new Error('لا يوجد يوم سابق مسجل في النظام لترحيل الدورة منه.');
   }
@@ -137,6 +159,80 @@ export function mapDayLifecycleRpcError(err: { message?: string } | Error | unkn
   }
 
   return new Error(message);
+}
+
+/**
+ * 0. rpc_initialize_first_day
+ * Atomically initializes the very first business day and machine accounts.
+ * Database contract:
+ *   p_business_date DATE
+ *   p_opening_business_cents BIGINT
+ *   p_machine_openings JSONB
+ */
+export async function initializeFirstDayRpc(
+  params: InitializeFirstDayParams
+): Promise<InitializeFirstDayRpcResult> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('الاتصال بقاعدة البيانات Supabase غير مهيأ');
+  }
+
+  const businessDate = params.businessDate.trim();
+  if (!businessDate) {
+    throw new Error('تاريخ أول يوم عمل مطلوب');
+  }
+
+  const openingCents = Math.max(0, Math.round(params.openingBusinessCents));
+
+  // Partition opening business balance across machines:
+  // Non-drawer machines receive their explicit allocations.
+  // The cash drawer ('m-cash-drawer') is mandatory and receives the remainder:
+  // drawerCents = openingCents - sum(other machines).
+  // Total sum of all machines strictly equals openingCents.
+  const rawList = params.machineOpenings || [];
+  const otherMachines = rawList.filter((m) => m.id.trim() !== 'm-cash-drawer');
+  const drawerItem = rawList.find((m) => m.id.trim() === 'm-cash-drawer');
+
+  const totalOtherAllocated = otherMachines.reduce(
+    (acc, m) => safeAdd(acc, Math.max(0, Math.round(m.opening_balance_cents))),
+    0
+  );
+
+  if (totalOtherAllocated > openingCents) {
+    throw new Error(
+      'لا يمكن أن يتجاوز مجموع مخصصات الماكينات إجمالي رصيد بداية النشاط.'
+    );
+  }
+
+  const drawerOpeningCents = Math.max(0, safeSubtract(openingCents, totalOtherAllocated));
+
+  const openingsPayload = [
+    {
+      id: 'm-cash-drawer',
+      name: drawerItem?.name?.trim() || 'درج الكاش',
+      opening_balance_cents: drawerOpeningCents,
+    },
+    ...otherMachines.map((m) => ({
+      id: m.id.trim(),
+      name: m.name?.trim() || m.id.trim(),
+      opening_balance_cents: Math.max(0, Math.round(m.opening_balance_cents)),
+    })),
+  ];
+
+  const { data, error } = await supabase.rpc('rpc_initialize_first_day', {
+    p_business_date: businessDate,
+    p_opening_business_cents: openingCents,
+    p_machine_openings: openingsPayload,
+  });
+
+  if (error) {
+    throw mapDayLifecycleRpcError(error);
+  }
+
+  if (!data || typeof data !== 'object' || !data.success || !data.day_id) {
+    throw new Error('فشل تهيئة اليوم الأول: استجابة غير صالحة من قاعدة البيانات');
+  }
+
+  return data as InitializeFirstDayRpcResult;
 }
 
 /**

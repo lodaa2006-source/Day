@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Play, ShieldCheck, AlertCircle, Smartphone, Info } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { X, Play, AlertCircle, Smartphone, Info, Plus } from 'lucide-react';
 import { useCash } from '../context/CashContext';
 import { formatEGP, parseAmountToCents, safeAdd, safeSubtract } from '../utils/money';
 
@@ -8,15 +8,54 @@ export const StartDayModal: React.FC = () => {
     isStartDayModalOpen,
     setIsStartDayModalOpen,
     activeDay,
+    days,
     machines,
+    initializeFirstDay,
     startNextDay,
     setActiveTab,
   } = useCash();
 
-  // Active machines
-  const activeMachines = machines.filter((m) => m.isActive);
+  const isFirstDay = days.length === 0;
+
+  // Extra machines added during first-day initialization
+  const [extraMachines, setExtraMachines] = useState<Array<{ id: string; name: string }>>([]);
+  const [newMachineName, setNewMachineName] = useState<string>('');
+  const [isAddingMachine, setIsAddingMachine] = useState<boolean>(false);
+
+  // Active non-drawer machines
+  const activeMachines = useMemo(() => {
+    const list: Array<{ id: string; name: string }> = [];
+    for (const m of machines) {
+      if (m.isActive && m.id !== 'm-cash-drawer') {
+        list.push({ id: m.id, name: m.name });
+      }
+    }
+    if (isFirstDay) {
+      for (const em of extraMachines) {
+        if (!list.some((item) => item.id === em.id)) {
+          list.push(em);
+        }
+      }
+    }
+    return list;
+  }, [machines, isFirstDay, extraMachines]);
+
+  // Default business date calculation
+  const defaultDate = useMemo(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (days.length === 0) return todayStr;
+    const lastDay = days[days.length - 1];
+    const lastDate = lastDay?.date ? String(lastDay.date).slice(0, 10) : '';
+    if (lastDate && todayStr <= lastDate) {
+      const d = new Date(lastDate);
+      d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString().split('T')[0];
+    }
+    return todayStr;
+  }, [days]);
 
   // Manual inputs - intentionally starts empty, NO auto-prefill from previous day
+  const [dateInput, setDateInput] = useState<string>(defaultDate);
   const [openingInput, setOpeningInput] = useState<string>('');
   const [machineInputs, setMachineInputs] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -62,13 +101,30 @@ export const StartDayModal: React.FC = () => {
     setError(null);
   };
 
+  const handleAddExtraMachine = () => {
+    const trimmed = newMachineName.trim();
+    if (!trimmed) return;
+    if (
+      activeMachines.some((m) => m.name.toLowerCase() === trimmed.toLowerCase()) ||
+      trimmed === 'درج الكاش'
+    ) {
+      setError('اسم الماكينة مستخدم بالفعل أو محجوز.');
+      return;
+    }
+    const newId = `m-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    setExtraMachines((prev) => [...prev, { id: newId, name: trimmed }]);
+    setNewMachineName('');
+    setIsAddingMachine(false);
+    setError(null);
+  };
+
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setError(null);
 
-    // Validate that previous day is closed
-    if (activeDay && activeDay.status !== 'CLOSED') {
+    // Validate that previous day is closed (if not first day)
+    if (!isFirstDay && activeDay && activeDay.status !== 'CLOSED') {
       setError('لا يمكن بدء يوم جديد لأن اليوم الحالي ما زال مفتوحاً. يجب إغلاق اليوم الحالي أولاً.');
       return;
     }
@@ -96,12 +152,24 @@ export const StartDayModal: React.FC = () => {
       return;
     }
 
+    const targetDate = dateInput.trim() || defaultDate;
+
     setIsSubmitting(true);
     try {
-      await startNextDay(businessParsed.cents, machineOpeningsMap);
+      if (isFirstDay) {
+        await initializeFirstDay(
+          businessParsed.cents,
+          machineOpeningsMap,
+          targetDate,
+          extraMachines
+        );
+      } else {
+        await startNextDay(businessParsed.cents, machineOpeningsMap, targetDate);
+      }
       setIsStartDayModalOpen(false);
       setOpeningInput('');
       setMachineInputs({});
+      setExtraMachines([]);
       setActiveTab('home');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'حدث خطأ أثناء بدء اليوم');
@@ -129,8 +197,12 @@ export const StartDayModal: React.FC = () => {
               <Play className="w-4 h-4 fill-white ms-0.5" />
             </div>
             <div>
-              <h3 className="text-base sm:text-lg font-bold text-stone-900 leading-tight">بدء دورة يوم جديد</h3>
-              <p className="text-xs text-stone-500 mt-0.5">إدخال رصيد البداية وتوزيع العهدة يدوياً</p>
+              <h3 className="text-base sm:text-lg font-bold text-stone-900 leading-tight">
+                {isFirstDay ? 'تهيئة أول يوم عمل' : 'بدء دورة يوم جديد'}
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                {isFirstDay ? 'إدخال رصيد البداية الأول وتوزيع العهدة' : 'إدخال رصيد البداية وتوزيع العهدة يدوياً'}
+              </p>
             </div>
           </div>
           <button
@@ -146,7 +218,7 @@ export const StartDayModal: React.FC = () => {
         {/* Modal Form */}
         <form onSubmit={handleStart} className="p-4 sm:p-5 space-y-4 overflow-y-auto">
           {/* Active Day Warning if not closed */}
-          {activeDay && activeDay.status === 'OPEN' && (
+          {!isFirstDay && activeDay && activeDay.status === 'OPEN' && (
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-start gap-2 leading-relaxed">
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <div>
@@ -159,7 +231,7 @@ export const StartDayModal: React.FC = () => {
           )}
 
           {/* Informational previous day balance - Strictly non-binding */}
-          {previousActualCounted !== null && (
+          {!isFirstDay && previousActualCounted !== null && (
             <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-stone-700 text-xs flex items-start gap-2">
               <Info className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
@@ -171,10 +243,31 @@ export const StartDayModal: React.FC = () => {
             </div>
           )}
 
+          {/* Business Date Input */}
+          <div>
+            <label htmlFor="start-day-date-input" className="text-xs font-bold text-stone-800 block mb-1.5">
+              تاريخ يوم العمل <span className="text-rose-600">*</span>
+            </label>
+            <input
+              id="start-day-date-input"
+              type="date"
+              value={dateInput}
+              onChange={(e) => {
+                setDateInput(e.target.value);
+                setError(null);
+              }}
+              className="w-full text-sm font-semibold font-mono py-2 px-3 bg-stone-50 border border-stone-300 rounded-xl focus:outline-none focus:border-stone-900 focus:bg-white text-stone-900"
+              required
+            />
+          </div>
+
           {/* Opening Business Balance Input */}
           <div>
             <label htmlFor="start-day-opening-input" className="text-xs font-bold text-stone-800 block mb-1.5">
-              رصيد بداية اليوم الجديد (إجمالي النقدية للنشاط) <span className="text-rose-600">*</span>
+              {isFirstDay
+                ? 'رصيد بداية اليوم الأول (إجمالي النقدية للنشاط)'
+                : 'رصيد بداية اليوم الجديد (إجمالي النقدية للنشاط)'}{' '}
+              <span className="text-rose-600">*</span>
             </label>
             <div className="relative">
               <input
@@ -195,41 +288,90 @@ export const StartDayModal: React.FC = () => {
               </span>
             </div>
             <p className="text-[11px] text-stone-500 mt-1">
-              أدخل المبلغ الإجمالي الذي يبدأ به النشاط اليوم (الدرج + عهد الماكينات).
+              أدخل المبلغ الإجمالي الذي يبدأ به النشاط اليوم (الدرج + عهد الماكينات والحسابات).
             </p>
           </div>
 
           {/* Machine Openings Inputs */}
           <div>
-            <div className="flex items-center gap-1.5 mb-2">
-              <Smartphone className="w-3.5 h-3.5 text-stone-500" />
-              <span className="text-xs font-bold text-stone-700">توزيع العهدة الافتتاحية على الماكينات والحسابات</span>
-            </div>
-            <div className="space-y-2 border border-stone-200 rounded-xl p-3 bg-stone-50/50">
-              {activeMachines.map((machine) => (
-                <div
-                  key={machine.id}
-                  className="flex items-center justify-between gap-3 text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/80"
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5">
+                <Smartphone className="w-3.5 h-3.5 text-stone-500" />
+                <span className="text-xs font-bold text-stone-700">توزيع العهدة الافتتاحية على الماكينات والحسابات</span>
+              </div>
+              {isFirstDay && !isAddingMachine && (
+                <button
+                  type="button"
+                  onClick={() => setIsAddingMachine(true)}
+                  className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 hover:text-emerald-800 cursor-pointer"
                 >
-                  <label htmlFor={`start-day-machine-${machine.id}`} className="font-semibold text-stone-700 shrink-0">
-                    {machine.name}
-                  </label>
-                  <div className="relative w-32">
-                    <input
-                      id={`start-day-machine-${machine.id}`}
-                      type="text"
-                      inputMode="decimal"
-                      placeholder="0.00"
-                      value={machineInputs[machine.id] ?? ''}
-                      onChange={(e) => handleMachineChange(machine.id, e.target.value)}
-                      className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-stone-50 border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
-                    />
-                    <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
-                      ج.م
-                    </span>
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>إضافة ماكينة للتوزيع</span>
+                </button>
+              )}
+            </div>
+
+            {/* Quick add machine input for first day */}
+            {isFirstDay && isAddingMachine && (
+              <div className="mb-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="اسم الماكينة (مثال: فوري، ممكن)"
+                  value={newMachineName}
+                  onChange={(e) => setNewMachineName(e.target.value)}
+                  className="flex-1 text-xs py-1.5 px-2.5 bg-white border border-emerald-300 rounded-lg text-stone-900 focus:outline-none focus:border-emerald-600"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddExtraMachine}
+                  className="px-3 py-1.5 bg-emerald-700 text-white font-bold text-xs rounded-lg hover:bg-emerald-800 transition-colors"
+                >
+                  إضافة
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddingMachine(false);
+                    setNewMachineName('');
+                  }}
+                  className="px-2 py-1.5 bg-stone-100 text-stone-600 font-bold text-xs rounded-lg hover:bg-stone-200 transition-colors"
+                >
+                  إلغاء
+                </button>
+              </div>
+            )}
+
+            <div className="space-y-2 border border-stone-200 rounded-xl p-3 bg-stone-50/50">
+              {activeMachines.length === 0 ? (
+                <p className="text-center text-xs text-stone-500 py-2">
+                  لا توجد ماكينات مخصصة بعد. سيتم وضع كامل رصيد البداية في درج الكاش الأساسي، أو يمكنك إضافة ماكينة للتوزيع أعلاه.
+                </p>
+              ) : (
+                activeMachines.map((machine) => (
+                  <div
+                    key={machine.id}
+                    className="flex items-center justify-between gap-3 text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/80"
+                  >
+                    <label htmlFor={`start-day-machine-${machine.id}`} className="font-semibold text-stone-700 shrink-0">
+                      {machine.name}
+                    </label>
+                    <div className="relative w-32">
+                      <input
+                        id={`start-day-machine-${machine.id}`}
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={machineInputs[machine.id] ?? ''}
+                        onChange={(e) => handleMachineChange(machine.id, e.target.value)}
+                        className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-stone-50 border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
+                      />
+                      <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
+                        ج.م
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
 
@@ -273,15 +415,23 @@ export const StartDayModal: React.FC = () => {
             <button
               id="confirm-start-day-btn"
               type="submit"
-              disabled={activeDay?.status === 'OPEN' || isSubmitting || isAllocationOverBudget}
+              disabled={(!isFirstDay && activeDay?.status === 'OPEN') || isSubmitting || isAllocationOverBudget}
               className={`flex-1 py-3.5 px-4 font-bold text-sm rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 ${
-                activeDay?.status === 'OPEN' || isSubmitting || isAllocationOverBudget
+                (!isFirstDay && activeDay?.status === 'OPEN') || isSubmitting || isAllocationOverBudget
                   ? 'bg-stone-200 text-stone-400 cursor-not-allowed'
                   : 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer'
               }`}
             >
               <Play className="w-4 h-4 fill-white" />
-              <span>{isSubmitting ? 'جاري بدء اليوم الجديد...' : 'تأكيد وبدء اليوم الجديد'}</span>
+              <span>
+                {isSubmitting
+                  ? isFirstDay
+                    ? 'جاري تهيئة أول يوم...'
+                    : 'جاري بدء اليوم الجديد...'
+                  : isFirstDay
+                  ? 'تأكيد وتهيئة أول يوم عمل'
+                  : 'تأكيد وبدء اليوم الجديد'}
+              </span>
             </button>
 
             <button
@@ -299,3 +449,4 @@ export const StartDayModal: React.FC = () => {
     </div>
   );
 };
+
