@@ -357,8 +357,12 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return calculateDailySummary(machineInitialTotal, [], undefined, undefined, 'OPEN', machineInitialTotal);
     }
     const allocatedOpening = currentDay.machineOpeningBalances
-      ? Object.values(currentDay.machineOpeningBalances).reduce((acc, val) => safeAdd(acc, val), 0)
-      : machines.reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
+      ? Object.entries(currentDay.machineOpeningBalances)
+          .filter(([id]) => id !== 'm-cash-drawer')
+          .reduce((acc, [, val]) => safeAdd(acc, val), 0)
+      : machines
+          .filter((m) => m.id !== 'm-cash-drawer')
+          .reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
 
     return calculateDailySummary(
       currentDay.openingBusinessBalanceCents,
@@ -600,12 +604,20 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (totalAllocatedToOtherMachines > safeOpening) {
-        throw new Error(
-          `لا يمكن أن يتجاوز إجمالي المبالغ الموزعة على الماكينات (${formatEGP(totalAllocatedToOtherMachines)}) رصيد بداية النشاط (${formatEGP(safeOpening)}).`
-        );
+        throw new Error('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
       }
 
-      const drawerCents = Math.max(0, safeSubtract(safeOpening, totalAllocatedToOtherMachines));
+      const explicitDrawerVal = machineOpenings?.['m-cash-drawer'];
+      let drawerCents: number;
+      if (explicitDrawerVal !== undefined && explicitDrawerVal > 0) {
+        if (safeAdd(totalAllocatedToOtherMachines, explicitDrawerVal) > safeOpening) {
+          throw new Error('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
+        }
+        drawerCents = explicitDrawerVal;
+      } else {
+        drawerCents = Math.max(0, safeSubtract(safeOpening, totalAllocatedToOtherMachines));
+      }
+
       nextMachineOpeningBalances['m-cash-drawer'] = drawerCents;
 
       const targetDate = businessDate || new Date().toISOString().split('T')[0];
@@ -1106,13 +1118,12 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeAmount = Math.max(0, Math.round(initialBalanceCents));
 
       if (currentDay && currentDay.status === 'OPEN' && currentDay.openingBusinessBalanceCents > 0) {
-        const currentAllocated = Object.values(currentDay.machineOpeningBalances || {}).reduce(
-          (acc, val) => safeAdd(acc, val),
-          0
-        );
+        const currentOtherAllocated = Object.entries(currentDay.machineOpeningBalances || {})
+          .filter(([id]) => id !== 'm-cash-drawer')
+          .reduce((acc, [, val]) => safeAdd(acc, val), 0);
         const validation = validateMachineAllocation(
           safeAmount,
-          currentAllocated,
+          currentOtherAllocated,
           currentDay.openingBusinessBalanceCents
         );
         if (!validation.valid) {
@@ -1176,8 +1187,19 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
               ...d.machineOpeningBalances,
               [newMachine.id]: safeAmount,
             };
-            const sumAllocated = Object.values(updatedOpenings).reduce((a, b) => safeAdd(a, b), 0);
-            const newOpening = d.openingBusinessBalanceCents > 0 ? d.openingBusinessBalanceCents : sumAllocated;
+            const sumOtherAllocated = Object.entries(updatedOpenings)
+              .filter(([id]) => id !== 'm-cash-drawer')
+              .reduce((a, [, b]) => safeAdd(a, b), 0);
+            if (d.openingBusinessBalanceCents > 0) {
+              updatedOpenings['m-cash-drawer'] = Math.max(
+                0,
+                safeSubtract(d.openingBusinessBalanceCents, sumOtherAllocated)
+              );
+            }
+            const newOpening =
+              d.openingBusinessBalanceCents > 0
+                ? d.openingBusinessBalanceCents
+                : Object.values(updatedOpenings).reduce((a, b) => safeAdd(a, b), 0);
             return {
               ...d,
               openingBusinessBalanceCents: newOpening,
@@ -1296,10 +1318,9 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeAmount = Math.max(0, Math.round(initialBalanceCents));
 
       if (currentDay && currentDay.status === 'OPEN' && currentDay.openingBusinessBalanceCents > 0) {
-        const otherAllocated = Object.entries(currentDay.machineOpeningBalances || {}).reduce(
-          (acc, [mId, val]) => (mId === id ? acc : safeAdd(acc, val)),
-          0
-        );
+        const otherAllocated = Object.entries(currentDay.machineOpeningBalances || {})
+          .filter(([mId]) => mId !== id && mId !== 'm-cash-drawer')
+          .reduce((acc, [, val]) => safeAdd(acc, val), 0);
         const validation = validateMachineAllocation(
           safeAmount,
           otherAllocated,
@@ -1324,8 +1345,19 @@ export const CashProvider: React.FC<{ children: React.ReactNode }> = ({ children
               ...d.machineOpeningBalances,
               [id]: safeAmount,
             };
-            const sumAllocated = Object.values(updatedMachineOpenings).reduce((acc, v) => safeAdd(acc, v), 0);
-            const newOpening = d.openingBusinessBalanceCents > 0 ? d.openingBusinessBalanceCents : sumAllocated;
+            const sumOtherAllocated = Object.entries(updatedMachineOpenings)
+              .filter(([mId]) => mId !== 'm-cash-drawer')
+              .reduce((acc, [, v]) => safeAdd(acc, v), 0);
+            if (d.openingBusinessBalanceCents > 0) {
+              updatedMachineOpenings['m-cash-drawer'] = Math.max(
+                0,
+                safeSubtract(d.openingBusinessBalanceCents, sumOtherAllocated)
+              );
+            }
+            const newOpening =
+              d.openingBusinessBalanceCents > 0
+                ? d.openingBusinessBalanceCents
+                : Object.values(updatedMachineOpenings).reduce((acc, v) => safeAdd(acc, v), 0);
             return {
               ...d,
               openingBusinessBalanceCents: newOpening,

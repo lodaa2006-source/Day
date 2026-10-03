@@ -355,12 +355,13 @@ export function calculateDaySummary(
 ): DailySummary {
   let allocatedOpeningCents = 0;
   if (day.machineOpeningBalances && Object.keys(day.machineOpeningBalances).length > 0) {
-    allocatedOpeningCents = Object.values(day.machineOpeningBalances).reduce(
-      (acc, bal) => safeAdd(acc, bal),
-      0
-    );
+    allocatedOpeningCents = Object.entries(day.machineOpeningBalances)
+      .filter(([id]) => id !== 'm-cash-drawer')
+      .reduce((acc, [, bal]) => safeAdd(acc, bal), 0);
   } else if (machines.length > 0) {
-    allocatedOpeningCents = machines.reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
+    allocatedOpeningCents = machines
+      .filter((m) => m.id !== 'm-cash-drawer')
+      .reduce((acc, m) => safeAdd(acc, m.initialBalanceCents), 0);
   }
 
   return calculateDailySummary(

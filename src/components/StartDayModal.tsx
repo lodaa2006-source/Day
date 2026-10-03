@@ -20,6 +20,7 @@ export const StartDayModal: React.FC = () => {
   // Extra machines added during first-day initialization
   const [extraMachines, setExtraMachines] = useState<Array<{ id: string; name: string }>>([]);
   const [newMachineName, setNewMachineName] = useState<string>('');
+  const [newMachineOpeningInput, setNewMachineOpeningInput] = useState<string>('');
   const [isAddingMachine, setIsAddingMachine] = useState<boolean>(false);
 
   // Active non-drawer machines
@@ -71,7 +72,7 @@ export const StartDayModal: React.FC = () => {
   const businessCents = parsedBusiness.cents >= 0 && !parsedBusiness.error ? parsedBusiness.cents : 0;
 
   // Parse machine inputs
-  let totalAllocatedCents = 0;
+  let otherAllocatedCents = 0;
   let hasInvalidMachineAmount = false;
   const machineOpeningsMap: Record<string, number> = {};
 
@@ -83,27 +84,83 @@ export const StartDayModal: React.FC = () => {
         hasInvalidMachineAmount = true;
       } else {
         machineOpeningsMap[m.id] = parsedM.cents;
-        totalAllocatedCents = safeAdd(totalAllocatedCents, parsedM.cents);
+        otherAllocatedCents = safeAdd(otherAllocatedCents, parsedM.cents);
       }
     } else {
       machineOpeningsMap[m.id] = 0;
     }
   }
 
-  const remainingCashCents = safeSubtract(businessCents, totalAllocatedCents);
-  const isAllocationOverBudget = totalAllocatedCents > businessCents;
+  // Handle Cash Drawer: either user typed an explicit amount, or it gets the remainder
+  const rawDrawerVal = machineInputs['m-cash-drawer'];
+  let drawerAllocatedCents = 0;
+  let hasExplicitDrawer = false;
+  if (rawDrawerVal !== undefined && rawDrawerVal.trim() !== '') {
+    const parsedDrawer = parseAmountToCents(rawDrawerVal);
+    if (parsedDrawer.error || parsedDrawer.cents < 0) {
+      hasInvalidMachineAmount = true;
+    } else {
+      drawerAllocatedCents = parsedDrawer.cents;
+      hasExplicitDrawer = true;
+    }
+  } else {
+    drawerAllocatedCents = Math.max(0, safeSubtract(businessCents, otherAllocatedCents));
+  }
+
+  const totalAllocatedCents = hasExplicitDrawer
+    ? safeAdd(otherAllocatedCents, drawerAllocatedCents)
+    : otherAllocatedCents;
+
+  const remainingCashCents = hasExplicitDrawer
+    ? safeSubtract(businessCents, totalAllocatedCents)
+    : drawerAllocatedCents;
+
+  const isAllocationOverBudget = hasExplicitDrawer
+    ? totalAllocatedCents > businessCents
+    : otherAllocatedCents > businessCents;
 
   const handleMachineChange = (machineId: string, value: string) => {
     setMachineInputs((prev) => ({
       ...prev,
       [machineId]: value,
     }));
+
+    const parsed = parseAmountToCents(value);
+    if (!parsed.error && parsed.cents > 0) {
+      let otherTotal = 0;
+      for (const m of activeMachines) {
+        if (m.id === machineId) continue;
+        const raw = machineInputs[m.id];
+        if (raw && raw.trim()) {
+          const p = parseAmountToCents(raw);
+          if (!p.error && p.cents > 0) {
+            otherTotal = safeAdd(otherTotal, p.cents);
+          }
+        }
+      }
+      if (machineId !== 'm-cash-drawer') {
+        const rawDr = machineInputs['m-cash-drawer'];
+        if (rawDr && rawDr.trim()) {
+          const pDr = parseAmountToCents(rawDr);
+          if (!pDr.error && pDr.cents > 0) {
+            otherTotal = safeAdd(otherTotal, pDr.cents);
+          }
+        }
+      }
+      if (businessCents > 0 && safeAdd(otherTotal, parsed.cents) > businessCents) {
+        setError('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
+        return;
+      }
+    }
     setError(null);
   };
 
   const handleAddExtraMachine = () => {
     const trimmed = newMachineName.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      setError('برجاء كتابة اسم الماكينة أو الحساب');
+      return;
+    }
     if (
       activeMachines.some((m) => m.name.toLowerCase() === trimmed.toLowerCase()) ||
       trimmed === 'درج الكاش'
@@ -111,9 +168,35 @@ export const StartDayModal: React.FC = () => {
       setError('اسم الماكينة مستخدم بالفعل أو محجوز.');
       return;
     }
+
+    let initialCents = 0;
+    if (newMachineOpeningInput.trim()) {
+      const parsed = parseAmountToCents(newMachineOpeningInput);
+      if (parsed.error || parsed.cents < 0) {
+        setError(parsed.error || 'المبلغ غير صالح');
+        return;
+      }
+      initialCents = parsed.cents;
+    }
+
+    // Check: its entered opening amount must be included exactly once.
+    // Reject only if total allocations would exceed the opening business amount.
+    const totalAfter = safeAdd(otherAllocatedCents, initialCents);
+    if (businessCents > 0 && totalAfter > businessCents) {
+      setError('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
+      return;
+    }
+
     const newId = `m-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     setExtraMachines((prev) => [...prev, { id: newId, name: trimmed }]);
+    if (initialCents > 0) {
+      setMachineInputs((prev) => ({
+        ...prev,
+        [newId]: newMachineOpeningInput.trim(),
+      }));
+    }
     setNewMachineName('');
+    setNewMachineOpeningInput('');
     setIsAddingMachine(false);
     setError(null);
   };
@@ -145,14 +228,18 @@ export const StartDayModal: React.FC = () => {
       return;
     }
 
-    if (totalAllocatedCents > businessParsed.cents) {
-      setError(
-        `لا يمكن أن يتجاوز إجمالي المبالغ الموزعة على الماكينات (${formatEGP(totalAllocatedCents)}) رصيد بداية النشاط (${formatEGP(businessParsed.cents)}).`
-      );
+    if (isAllocationOverBudget) {
+      setError('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
       return;
     }
 
     const targetDate = dateInput.trim() || defaultDate;
+
+    // Set drawer amount in openings map
+    const finalDrawerCents = hasExplicitDrawer
+      ? drawerAllocatedCents
+      : Math.max(0, safeSubtract(businessParsed.cents, otherAllocatedCents));
+    machineOpeningsMap['m-cash-drawer'] = finalDrawerCents;
 
     setIsSubmitting(true);
     try {
@@ -313,65 +400,105 @@ export const StartDayModal: React.FC = () => {
 
             {/* Quick add machine input for first day */}
             {isFirstDay && isAddingMachine && (
-              <div className="mb-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center gap-2">
+              <div className="mb-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <input
                   type="text"
                   placeholder="اسم الماكينة (مثال: فوري، ممكن)"
                   value={newMachineName}
-                  onChange={(e) => setNewMachineName(e.target.value)}
+                  onChange={(e) => {
+                    setNewMachineName(e.target.value);
+                    setError(null);
+                  }}
                   className="flex-1 text-xs py-1.5 px-2.5 bg-white border border-emerald-300 rounded-lg text-stone-900 focus:outline-none focus:border-emerald-600"
                 />
-                <button
-                  type="button"
-                  onClick={handleAddExtraMachine}
-                  className="px-3 py-1.5 bg-emerald-700 text-white font-bold text-xs rounded-lg hover:bg-emerald-800 transition-colors"
-                >
-                  إضافة
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsAddingMachine(false);
-                    setNewMachineName('');
-                  }}
-                  className="px-2 py-1.5 bg-stone-100 text-stone-600 font-bold text-xs rounded-lg hover:bg-stone-200 transition-colors"
-                >
-                  إلغاء
-                </button>
+                <div className="relative w-full sm:w-28">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="رصيد البداية"
+                    value={newMachineOpeningInput}
+                    onChange={(e) => {
+                      setNewMachineOpeningInput(e.target.value);
+                      setError(null);
+                    }}
+                    className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-7 bg-white border border-emerald-300 rounded-lg text-stone-900 focus:outline-none focus:border-emerald-600 text-end"
+                  />
+                  <span className="absolute end-1.5 top-1/2 -translate-y-1/2 text-[9px] font-bold text-stone-400 font-mono">
+                    ج.م
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleAddExtraMachine}
+                    className="px-3 py-1.5 bg-emerald-700 text-white font-bold text-xs rounded-lg hover:bg-emerald-800 transition-colors"
+                  >
+                    إضافة
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAddingMachine(false);
+                      setNewMachineName('');
+                      setNewMachineOpeningInput('');
+                    }}
+                    className="px-2 py-1.5 bg-stone-100 text-stone-600 font-bold text-xs rounded-lg hover:bg-stone-200 transition-colors"
+                  >
+                    إلغاء
+                  </button>
+                </div>
               </div>
             )}
 
             <div className="space-y-2 border border-stone-200 rounded-xl p-3 bg-stone-50/50">
-              {activeMachines.length === 0 ? (
-                <p className="text-center text-xs text-stone-500 py-2">
-                  لا توجد ماكينات مخصصة بعد. سيتم وضع كامل رصيد البداية في درج الكاش الأساسي، أو يمكنك إضافة ماكينة للتوزيع أعلاه.
-                </p>
-              ) : (
-                activeMachines.map((machine) => (
-                  <div
-                    key={machine.id}
-                    className="flex items-center justify-between gap-3 text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/80"
-                  >
-                    <label htmlFor={`start-day-machine-${machine.id}`} className="font-semibold text-stone-700 shrink-0">
-                      {machine.name}
-                    </label>
-                    <div className="relative w-32">
-                      <input
-                        id={`start-day-machine-${machine.id}`}
-                        type="text"
-                        inputMode="decimal"
-                        placeholder="0.00"
-                        value={machineInputs[machine.id] ?? ''}
-                        onChange={(e) => handleMachineChange(machine.id, e.target.value)}
-                        className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-stone-50 border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
-                      />
-                      <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
-                        ج.م
-                      </span>
-                    </div>
+              {/* Cash Drawer Account */}
+              <div className="flex items-center justify-between gap-3 text-xs py-1.5 px-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200/90">
+                <div className="flex items-center gap-1.5 font-bold text-stone-800 shrink-0">
+                  <span>درج الكاش</span>
+                  <span className="text-[10px] text-emerald-800 bg-emerald-100/90 px-1.5 py-0.5 rounded font-semibold">
+                    أساسي
+                  </span>
+                </div>
+                <div className="relative w-32">
+                  <input
+                    id="start-day-machine-m-cash-drawer"
+                    type="text"
+                    inputMode="decimal"
+                    placeholder={formatEGP(drawerAllocatedCents).replace(' ج.م', '')}
+                    value={machineInputs['m-cash-drawer'] ?? ''}
+                    onChange={(e) => handleMachineChange('m-cash-drawer', e.target.value)}
+                    className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-white border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
+                  />
+                  <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
+                    ج.م
+                  </span>
+                </div>
+              </div>
+
+              {activeMachines.map((machine) => (
+                <div
+                  key={machine.id}
+                  className="flex items-center justify-between gap-3 text-xs py-1 px-2 rounded-lg bg-white border border-stone-200/80"
+                >
+                  <label htmlFor={`start-day-machine-${machine.id}`} className="font-semibold text-stone-700 shrink-0">
+                    {machine.name}
+                  </label>
+                  <div className="relative w-32">
+                    <input
+                      id={`start-day-machine-${machine.id}`}
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={machineInputs[machine.id] ?? ''}
+                      onChange={(e) => handleMachineChange(machine.id, e.target.value)}
+                      className="w-full text-xs font-mono font-bold py-1.5 ps-2 pe-8 bg-stone-50 border border-stone-300 rounded-lg text-stone-900 focus:outline-none focus:border-stone-900 text-end"
+                    />
+                    <span className="absolute end-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400 font-mono">
+                      ج.م
+                    </span>
                   </div>
-                ))
-              )}
+                </div>
+              ))}
             </div>
           </div>
 
@@ -383,22 +510,22 @@ export const StartDayModal: React.FC = () => {
             </div>
             <div className="flex items-center justify-between text-stone-600">
               <span>إجمالي الموزع على الماكينات:</span>
-              <span className="font-mono font-bold text-stone-900">{formatEGP(totalAllocatedCents)}</span>
+              <span className="font-mono font-bold text-stone-900">{formatEGP(otherAllocatedCents)}</span>
             </div>
             <div className="flex items-center justify-between pt-1 border-t border-stone-200">
-              <span className="font-semibold text-stone-700">النقدية غير الموزعة (درج الكاش):</span>
+              <span className="font-semibold text-stone-700">رصيد درج الكاش:</span>
               <span
                 className={`font-mono font-black ${
                   isAllocationOverBudget ? 'text-rose-600' : 'text-emerald-700'
                 }`}
               >
-                {formatEGP(remainingCashCents)}
+                {formatEGP(drawerAllocatedCents)}
               </span>
             </div>
             {isAllocationOverBudget && (
               <div className="text-[11px] font-bold text-rose-600 mt-1 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>المبالغ الموزعة على الماكينات تتجاوز إجمالي رصيد بداية اليوم!</span>
+                <span>المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.</span>
               </div>
             )}
           </div>
