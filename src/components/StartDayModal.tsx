@@ -107,17 +107,17 @@ export const StartDayModal: React.FC = () => {
     drawerAllocatedCents = Math.max(0, safeSubtract(businessCents, otherAllocatedCents));
   }
 
-  const totalAllocatedCents = hasExplicitDrawer
+  // Sum of all currently entered machine opening allocations
+  const totalEnteredAllocationsCents = hasExplicitDrawer
     ? safeAdd(otherAllocatedCents, drawerAllocatedCents)
     : otherAllocatedCents;
 
-  const remainingCashCents = hasExplicitDrawer
-    ? safeSubtract(businessCents, totalAllocatedCents)
-    : drawerAllocatedCents;
+  // Remaining = opening business amount - sum(all currently entered machine opening allocations)
+  const remainingCashCents = safeSubtract(businessCents, totalEnteredAllocationsCents);
 
-  const isAllocationOverBudget = hasExplicitDrawer
-    ? totalAllocatedCents > businessCents
-    : otherAllocatedCents > businessCents;
+  const isAllocationOverBudget = businessCents > 0
+    ? totalEnteredAllocationsCents > businessCents
+    : totalEnteredAllocationsCents > 0;
 
   const handleMachineChange = (machineId: string, value: string) => {
     setMachineInputs((prev) => ({
@@ -147,7 +147,8 @@ export const StartDayModal: React.FC = () => {
           }
         }
       }
-      if (businessCents > 0 && safeAdd(otherTotal, parsed.cents) > businessCents) {
+      const newTotal = safeAdd(otherTotal, parsed.cents);
+      if (businessCents > 0 && newTotal > businessCents) {
         setError('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
         return;
       }
@@ -179,10 +180,11 @@ export const StartDayModal: React.FC = () => {
       initialCents = parsed.cents;
     }
 
-    // Check: its entered opening amount must be included exactly once.
-    // Reject only if total allocations would exceed the opening business amount.
-    const totalAfter = safeAdd(otherAllocatedCents, initialCents);
-    if (businessCents > 0 && totalAfter > businessCents) {
+    // When adding a new machine:
+    // - its entered opening amount must be included exactly once.
+    // - reject only if the total allocations would exceed the opening business amount.
+    const totalAllocationsWithNew = safeAdd(totalEnteredAllocationsCents, initialCents);
+    if (businessCents > 0 && totalAllocationsWithNew > businessCents) {
       setError('المبلغ المطلوب توزيعه أكبر من المبلغ المتبقي من افتتاح اليوم.');
       return;
     }
@@ -512,14 +514,23 @@ export const StartDayModal: React.FC = () => {
               <span>إجمالي الموزع على الماكينات:</span>
               <span className="font-mono font-bold text-stone-900">{formatEGP(otherAllocatedCents)}</span>
             </div>
+            <div className="flex items-center justify-between text-stone-600">
+              <span>رصيد درج الكاش:</span>
+              <span className="font-mono font-bold text-stone-900">
+                {formatEGP(drawerAllocatedCents)}
+                {!hasExplicitDrawer && businessCents > 0 && (
+                  <span className="text-[10px] text-stone-400 ms-1 font-sans">(تلقائي)</span>
+                )}
+              </span>
+            </div>
             <div className="flex items-center justify-between pt-1 border-t border-stone-200">
-              <span className="font-semibold text-stone-700">رصيد درج الكاش:</span>
+              <span className="font-semibold text-stone-700">المتبقي غير الموزع:</span>
               <span
                 className={`font-mono font-black ${
                   isAllocationOverBudget ? 'text-rose-600' : 'text-emerald-700'
                 }`}
               >
-                {formatEGP(drawerAllocatedCents)}
+                {formatEGP(Math.max(0, remainingCashCents))}
               </span>
             </div>
             {isAllocationOverBudget && (

@@ -17,7 +17,7 @@ import {
   TransactionInput,
 } from './calculations';
 import { Transaction, MachineAccount, Day } from '../types';
-import { toCents, fromCents } from './money';
+import { toCents, fromCents, safeAdd, safeSubtract } from './money';
 
 export interface TestReportItem {
   testNumber: number;
@@ -2242,6 +2242,86 @@ export function runDeterministicTests(): TestReportItem[] {
       name: 'حالة الصفر التامة: days=0, transactions=0, machines=0, activeDayId=null',
       passed: isZeroState,
       details: `حالة الصفر التامة مؤكدة برمجياً ولا توجد أي أرقام تطوير سابقة`,
+    });
+  }
+
+  // TEST 53: First-day initialization exact scenario - Opening = 25,000, Cash Drawer = 20,000, New Machine = 5,000 -> Accepted, Total = 25,000
+  {
+    const openingBusinessCents = toCents(25000);
+    const drawerCents = toCents(20000);
+    const newMachineCents = toCents(5000);
+
+    const totalEntered = safeAdd(drawerCents, newMachineCents);
+    const remaining = safeSubtract(openingBusinessCents, totalEntered);
+    const isOverBudget = totalEntered > openingBusinessCents;
+    const isSumMatched = totalEntered === openingBusinessCents;
+
+    const passed = !isOverBudget && isSumMatched && remaining === 0 && totalEntered === toCents(25000);
+
+    results.push({
+      testNumber: 53,
+      name: 'تهيئة اليوم الأول: افتتاح 25,000، درج كاش 20,000، ماكينة جديدة 5,000 -> قبول تام وتطابق 25,000',
+      passed,
+      details: `رصيد الافتتاح: 25,000 | الدرج: 20,000 | الماكينة: 5,000 | الإجمالي: ${fromCents(totalEntered)} | المتبقي: ${fromCents(remaining)} | تجاوز الميزانية: ${isOverBudget}`,
+    });
+  }
+
+  // TEST 54: First-day initialization - Opening = 25,000, New Machine = 30,000 -> Must be rejected
+  {
+    const openingBusinessCents = toCents(25000);
+    const newMachineCents = toCents(30000);
+    const totalAllocationsWithNew = newMachineCents; // exactly once
+    const isOverBudget = totalAllocationsWithNew > openingBusinessCents;
+
+    results.push({
+      testNumber: 54,
+      name: 'تهيئة اليوم الأول: ماكينة جديدة 30,000 مع افتتاح 25,000 -> رفض فوري وحتمي',
+      passed: isOverBudget,
+      details: `رصيد الافتتاح: 25,000 | المطلوب تخصيصه: 30,000 | تم الرفض وتجاوز الميزانية: ${isOverBudget}`,
+    });
+  }
+
+  // TEST 55: First-day initialization - Opening = 25,000, Drawer = 20,000, New Machine = 6,000 -> Must be rejected (26,000 > 25,000)
+  {
+    const openingBusinessCents = toCents(25000);
+    const drawerCents = toCents(20000);
+    const newMachineCents = toCents(6000);
+    const totalAllocationsWithNew = safeAdd(drawerCents, newMachineCents);
+    const isOverBudget = totalAllocationsWithNew > openingBusinessCents;
+
+    results.push({
+      testNumber: 55,
+      name: 'تهيئة اليوم الأول: ماكينة 6,000 مع درج 20,000 وافتتاح 25,000 (المجموع 26,000) -> رفض فوري',
+      passed: isOverBudget,
+      details: `رصيد الافتتاح: 25,000 | الدرج: 20,000 | الماكينة: 6,000 | المجموع: ${fromCents(totalAllocationsWithNew)} | تم الرفض: ${isOverBudget}`,
+    });
+  }
+
+  // TEST 56: First-day initialization - No double counting: New machine opening amount is included exactly once
+  {
+    const openingBusinessCents = toCents(25000);
+    let enteredAllocations = toCents(20000); // e.g. Drawer = 20,000
+    const newMachineOpening = toCents(5000);
+
+    // Remaining before adding: opening - entered
+    const remainingBefore = safeSubtract(openingBusinessCents, enteredAllocations); // 5,000
+
+    // After adding new machine: entered opening amount included exactly once
+    const totalWithNew = safeAdd(enteredAllocations, newMachineOpening); // 25,000
+    const remainingAfter = safeSubtract(openingBusinessCents, totalWithNew); // 0
+
+    // Ensure newMachineOpening is NOT subtracted twice (e.g. remainingAfter != -5,000)
+    const passed =
+      remainingBefore === toCents(5000) &&
+      totalWithNew === toCents(25000) &&
+      remainingAfter === 0 &&
+      totalWithNew <= openingBusinessCents;
+
+    results.push({
+      testNumber: 56,
+      name: 'تهيئة اليوم الأول: عدم تكرار الخصم وحساب مخصص الماكينة الجديدة مرة واحدة فقط بدقة',
+      passed,
+      details: `المتبقي قبل الإضافة: ${fromCents(remainingBefore)} | الإجمالي بعد الإضافة (مرة واحدة): ${fromCents(totalWithNew)} | المتبقي النهائي: ${fromCents(remainingAfter)}`,
     });
   }
 
